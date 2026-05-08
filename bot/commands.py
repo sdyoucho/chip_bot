@@ -1073,19 +1073,6 @@ async def setup_commands(bot: commands.Bot):
             inline=False,
         )
 
-        # ── 설정 ──
-        cfg = [
-            ("/config_ai",      "AI API 키 입력 (Gemini·Claude·GPT·Perplexity·OpenRouter)"),
-            ("/config_notion",  "Notion 토큰 + DB ID"),
-            ("/config_discord", "Guild ID · 오퍼레이터 ID · 포럼 채널 ID"),
-            ("/config_status",  "현재 API 키 설정 현황"),
-        ]
-        embed.add_field(
-            name="⚙️ 설정",
-            value="\n".join(f"**{c}** — {d}" for c, d in cfg),
-            inline=False,
-        )
-
         # ── 개쵸 R&D ──
         rnd_cmds = [
             ("/rnd_health",     "봇 건강 상태 자가 진단"),
