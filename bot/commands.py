@@ -1,25 +1,240 @@
 """
 bot/commands.py
-모든 슬래시 커맨드 정의.
-Cho(오퍼레이터)만 사용 가능 — CHO_USER_ID 체크.
+Discord 슬래시 커맨드 등록 + 헬퍼 함수.
 """
 
+# ═══════════════════════════════════════════════════════════════════
+# Imports (반드시 파일 최상단)
+# ═══════════════════════════════════════════════════════════════════
+import asyncio                          # ← cmd_reboot 등에서 사용
+import io                               # ← _send_as_file에서 사용
 import logging
 import os
+import traceback                        # ← record_error에서 사용
+from datetime import datetime
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.router import route
 from bot.embeds import (
-    embed_error, embed_info, embed_thinking,
-    embed_unknown_command
+    embed_error, embed_info, embed_success,
+    embed_unknown_command,
 )
 
 log = logging.getLogger(__name__)
 
-CHO_USER_ID = int(os.getenv("CHO_USER_ID", "0"))
+
+# ═══════════════════════════════════════════════════════════════════
+# 권한 체크 데코레이터
+# ═══════════════════════════════════════════════════════════════════
+def is_cho():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        cho_id_str = os.getenv("CHO_USER_ID", "").strip()
+        if not cho_id_str.isdigit():
+            await interaction.response.send_message(
+                embed=embed_error(
+                    "설정 오류",
+                    "CHO_USER_ID 미설정. `/config_discord`로 설정해주세요.",
+                ),
+                ephemeral=True,
+            )
+            return False
+        if interaction.user.id != int(cho_id_str):
+            await interaction.response.send_message(
+                embed=embed_error("접근 불가", "이 봇은 오퍼레이터 전용입니다."),
+                ephemeral=True,
+            )
+            return False
+        return True
+    return app_commands.check(predicate)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# /ask 헬퍼 함수들 (모듈 레벨 — 반드시 setup_commands 밖에!)
+# ═══════════════════════════════════════════════════════════════════
+
+def _is_embed_valid(embed: discord.Embed) -> bool:
+    """Discord Embed 제약 조건 검증."""
+    if embed is None:
+        return False
+    has_content = (
+        bool(embed.title) or
+        bool(embed.description) or
+        len(embed.fields) > 0
+    )
+    if not has_content:
+        return False
+    if embed.title and len(embed.title) > 256:
+        return False
+    if embed.description and len(embed.description) > 4096:
+        return False
+    total = len(embed.title or "") + len(embed.description or "")
+    for f in embed.fields:
+        total += len(f.name or "") + len(f.value or "")
+    if total > 6000:
+        return False
+    return True
+
+
+async def _send_as_file(
+    interaction: discord.Interaction,
+    embed: discord.Embed,
+) -> bool:
+    """Embed → 텍스트 파일로 변환 후 첨부 전송."""
+    try:
+        lines = []
+        if embed.title:
+            lines.append(f"# {embed.title}\n")
+        if embed.description:
+            lines.append(embed.description + "\n")
+        for f in embed.fields:
+            lines.append(f"\n## {f.name}\n{f.value}\n")
+        if embed.footer and embed.footer.text:
+            lines.append(f"\n---\n{embed.footer.text}")
+
+        content = "\n".join(lines)
+        file = discord.File(
+            fp=io.BytesIO(content.encode("utf-8")),
+            filename=f"response_{datetime.now():%H%M%S}.md",
+        )
+        notice = discord.Embed(
+            title="📎 응답이 길어서 파일로 전달합니다",
+            description=f"{embed.title or '응답'}\n(Embed 크기 초과)",
+            color=0xEAB308,
+        )
+        await interaction.followup.send(embed=notice, file=file)
+        return True
+    except Exception as e:
+        log.error(f"파일 폴백 실패: {e}")
+        return False
+
+
+async def _dm_fallback(
+    interaction: discord.Interaction,
+    embed: discord.Embed,
+) -> bool:
+    """Interaction 만료 시 Cho에게 DM으로 전송."""
+    try:
+        await interaction.user.send(
+            content="⚠️ 응답이 지연되어 DM으로 전달합니다.",
+            embed=embed,
+        )
+        return True
+    except Exception as e:
+        log.error(f"DM 폴백 실패: {e}")
+        return False
+
+
+async def _safe_send_embed(
+    interaction: discord.Interaction,
+    embed: discord.Embed,
+) -> bool:
+    """followup.send 안전 래퍼."""
+    try:
+        if not _is_embed_valid(embed):
+            return await _send_as_file(interaction, embed)
+        await interaction.followup.send(embed=embed)
+        return True
+    except discord.NotFound:
+        log.warning("Interaction 만료 — DM 폴백 시도")
+        return await _dm_fallback(interaction, embed)
+    except discord.HTTPException as e:
+        log.error(f"followup.send HTTPException: {e}")
+        if e.status == 400:
+            return await _send_as_file(interaction, embed)
+        return False
+    except Exception as e:
+        log.exception(f"followup.send 예외: {e}")
+        return False
+
+
+async def _safe_followup(
+    interaction: discord.Interaction,
+    embed: discord.Embed,
+    ephemeral: bool = False,
+) -> None:
+    """오류 안전 followup (예외 시 무시)."""
+    try:
+        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+    except Exception as e:
+        log.warning(f"_safe_followup 실패: {e}")
+
+
+def _build_fallback_embed(query: str, agent_results: dict) -> discord.Embed:
+    """응답 생성 실패 시 친절한 안내 Embed."""
+    embed = discord.Embed(
+        title="🤔 답변을 생성하기 어려웠어요",
+        description=(
+            f"요청: `{query[:200]}`\n\n"
+            "AI가 응답을 생성했지만 적절한 형태로 정리되지 못했습니다."
+        ),
+        color=0xEAB308,
+    )
+    if agent_results:
+        attempted = ", ".join(f"`{n}`" for n in agent_results.keys())
+        embed.add_field(name="🔧 호출된 에이전트", value=attempted, inline=False)
+
+    embed.add_field(
+        name="💡 다시 시도해보실 점",
+        value=(
+            "• **더 구체적인 질문**으로 재시도 (스트리머/기간/형식 명시)\n"
+            "• **전용 커맨드** 사용 (`/money`, `/schedule`, `/youtube` 등)\n"
+            "• `/rawdata ephemeral` → 파이프라인 확인\n"
+            "• 응답이 Discord 제한(6000자) 초과했을 수 있음"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📋 설명이 부족할 수 있는 부분",
+        value=(
+            "• 어떤 **스트리머**에 대한 질문인지\n"
+            "• 어떤 **기간**\n"
+            "• 원하는 **출력 형식**"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="개쵸(/rnd_diagnose)로 시스템 이슈 신고 가능")
+    return embed
+
+
+async def _send_ask_response(
+    interaction: discord.Interaction,
+    query: str,
+    summary_embed: discord.Embed | None,
+    agent_results: dict,
+) -> bool:
+    """/ask 응답 전송. 반환값: 전송 성공 여부."""
+    from utils.pipeline_logger import step
+
+    if summary_embed:
+        ok = await _safe_send_embed(interaction, summary_embed)
+        if ok:
+            step("응답 전송", "ok", "summary_embed")
+            return True
+
+    if agent_results:
+        for agent_name, result_tuple in agent_results.items():
+            if not result_tuple:
+                continue
+            embed = result_tuple[0] if isinstance(result_tuple, tuple) else None
+            if embed is None:
+                continue
+            if not _is_embed_valid(embed):
+                step(
+                    f"Embed 검증 [{agent_name}]", "fail",
+                    f"title={bool(embed.title)} desc_len={len(embed.description or '')}",
+                    "E012",
+                )
+                continue
+            ok = await _safe_send_embed(interaction, embed)
+            if ok:
+                step("응답 전송", "ok", f"agent={agent_name}")
+                return True
+
+    step("응답 전송", "fail", "유효한 embed 없음", "E012")
+    fallback = _build_fallback_embed(query, agent_results)
+    return await _safe_send_embed(interaction, fallback)
 
 
 # ── /config 모달 정의 ────────────────────────────────────────────────
@@ -187,43 +402,95 @@ async def setup_commands(bot: commands.Bot):
         from bot.router import route
         from modules.haecho import orchestrate
         from utils.forum_publisher import publish_session
+        from bot.interactive import AskProgressView, build_progress_embed
+        import time
 
         start_trace()
+        t_start = time.monotonic()
         summary_embed = None
         agent_results = {}
 
-        try:
+        # 진행 상태 + 정지 버튼
+        view = AskProgressView(query=query, owner_id=interaction.user.id)
+        progress_msg = await interaction.followup.send(
+            embed=build_progress_embed(query, "라우팅", "필요한 에이전트 선별 중..."),
+            view=view,
+        )
+
+        # 실제 작업 코루틴
+        async def _do_work():
+            nonlocal summary_embed, agent_results
             # ① Router
             routing = await route(query)
             step(
-                "Router (OpenRouter)",
-                "ok",
+                "Router (OpenRouter)", "ok",
                 f"agents={[m['name'] for m in routing['modules']]} "
                 f"summary={routing['needs_haecho_summary']}",
             )
+
+            # 진행 상태 업데이트
+            agents_str = ", ".join(m['name'] for m in routing['modules'])
+            elapsed = int((time.monotonic() - t_start) * 1000)
+            try:
+                await progress_msg.edit(
+                    embed=build_progress_embed(
+                        query, "수집",
+                        f"에이전트 호출 중: **{agents_str}**",
+                        elapsed_ms=elapsed,
+                    ),
+                    view=view,
+                )
+            except Exception:
+                pass  # 편집 실패해도 계속 진행
 
             # ② Orchestration
             result = await orchestrate(query, routing, streamer)
             agent_results = result.get("agent_results", {}) or {}
             summary_embed = result.get("summary_embed")
 
-            # ③ 응답 결정 & 검증 후 전송
-            response_sent = await _send_ask_response(
-                interaction, query, summary_embed, agent_results
-            )
+            return summary_embed, agent_results
 
-            if not response_sent:
-                step("응답 전송", "fail", "모든 경로 실패", "E012")
-                await _safe_followup(
-                    interaction,
-                    embed=embed_error(
-                        "답변 생성 실패",
-                        "응답을 생성했지만 Discord로 전달하지 못했습니다.\n"
-                        "`/rawdata ephemeral`로 트레이스를 확인해주세요.",
-                    ),
-                )
+        # 작업을 Task로 감싸서 취소 가능하게
+        work_task = asyncio.create_task(_do_work())
+        view.task = work_task
 
-            # ④ Forum 병렬 발행 (선택)
+        try:
+            # 타임아웃 4분 (Discord 15분 제한 내에서 여유)
+            await asyncio.wait_for(work_task, timeout=240)
+
+            if view.cancelled:
+                # 정지 버튼으로 취소됨 → 메시지 이미 업데이트됨
+                return
+
+            # ③ 최종 응답 전송 (progress_msg 수정 또는 새 메시지)
+            elapsed_total = int((time.monotonic() - t_start) * 1000)
+
+            # 완료 시 progress 메시지를 최종 응답으로 교체
+            final_embed = summary_embed
+            if not final_embed and agent_results:
+                # 첫 agent의 embed 사용
+                for _, result_tuple in agent_results.items():
+                    if isinstance(result_tuple, tuple) and result_tuple[0]:
+                        if _is_embed_valid(result_tuple[0]):
+                            final_embed = result_tuple[0]
+                            break
+
+            if not final_embed:
+                final_embed = _build_fallback_embed(query, agent_results)
+
+            # View에서 정지 버튼 제거 (작업 완료됨)
+            view.clear_items()
+            view.stop()
+
+            try:
+                await progress_msg.edit(embed=final_embed, view=None)
+                step("응답 전송", "ok", f"총 {elapsed_total}ms")
+            except discord.HTTPException as e:
+                # 편집 실패 시 새 메시지로 전송
+                log.warning(f"progress 메시지 편집 실패: {e} → 새 메시지 전송")
+                await _safe_send_embed(interaction, final_embed)
+
+            # ④ Forum 병렬 발행
             if summary_embed and agent_results:
                 asyncio.create_task(publish_session(
                     bot,
@@ -232,13 +499,42 @@ async def setup_commands(bot: commands.Bot):
                     summary_embed=summary_embed,
                 ))
 
+        except asyncio.TimeoutError:
+            # 4분 초과 → 타임아웃 안내
+            step("처리", "fail", "4분 타임아웃", "E013")
+            work_task.cancel()
+            timeout_embed = discord.Embed(
+                title="⏱️ 응답 시간 초과",
+                description=(
+                    f"**쿼리**: `{query[:200]}`\n\n"
+                    "작업이 4분 내에 완료되지 않아 중단되었습니다.\n\n"
+                    "**원인 가능성**:\n"
+                    "• LLM 응답 지연 (OpenRouter 혼잡)\n"
+                    "• 요청 범위가 너무 광범위 (기간/대상 축소 권장)\n"
+                    "• 네트워크 이슈\n\n"
+                    "**해결책**:\n"
+                    "• 쿼리를 더 구체적으로 재작성\n"
+                    "• `/rnd_health`로 봇 상태 확인\n"
+                    "• 잠시 후 재시도"
+                ),
+                color=0xF97316,
+            )
+            try:
+                await progress_msg.edit(embed=timeout_embed, view=None)
+            except Exception:
+                await _safe_followup(interaction, embed=timeout_embed)
+
+        except asyncio.CancelledError:
+            # 정지 버튼으로 취소 — 메시지 이미 View가 처리
+            log.info(f"/ask 취소됨 (쿼리: {query[:40]})")
+            return
+
         except Exception as e:
             log.exception(f"/ask 오류: {e}")
             step("처리", "fail", str(e)[:100], "E000")
 
-            # 🆕 자동 에러 수집 (개쵸 R&D 자동화 연계)
+            # 자동 에러 수집
             try:
-                import traceback
                 from utils.self_monitor import record_error
                 record_error(
                     category="cmd_ask",
@@ -246,12 +542,13 @@ async def setup_commands(bot: commands.Bot):
                     traceback_str=traceback.format_exc(),
                 )
             except Exception:
-                pass  # 수집 실패해도 메인 흐름 유지
+                pass
 
-            await _safe_followup(
-                interaction,
-                embed=embed_error("오류", str(e)[:1500]),
-            )
+            err_embed = embed_error("오류", str(e)[:1500])
+            try:
+                await progress_msg.edit(embed=err_embed, view=None)
+            except Exception:
+                await _safe_followup(interaction, embed=err_embed)
 
         finally:
             # ⑤ Raw Data 트레이스 출력
@@ -278,6 +575,7 @@ async def setup_commands(bot: commands.Bot):
                                     ))
                                 except Exception as ch_err:
                                     log.warning(f"트레이스 채널 전송 실패: {ch_err}")
+
 
     # ── /monitor — 방송 현황 ─────────────────────────────────────────
     @bot.tree.command(name="monitor", description="스트리머 방송 현황 확인")
@@ -1028,148 +1326,19 @@ async def setup_commands(bot: commands.Bot):
 
 
     # ── /help ────────────────────────────────────────────────────────
-    @bot.tree.command(name="help", description="사용 가능한 명령 목록")
+    @bot.tree.command(name="help", description="사용 가능한 명령어 (페이지별)")
     @is_cho()
     async def cmd_help(interaction: discord.Interaction):
-        embed = discord.Embed(
-            title="🤖 Cho's 매니지먼트 봇 — 명령 목록",
-            description="오퍼레이터 전용 — Cho만 사용 가능",
-            color=0x4F46E5,
-        )
+        from bot.help_view import HelpView
 
-        # ── 핵심 운영 ──
-        core = [
-            ("/ask `[질문]` `[스트리머?]`",  "자연어 통합 명령 — 해쵸가 필요 agent 자동 선별"),
-            ("/monitor `[스트리머]`",          "실시간 방송 현황 (모쵸)"),
-            ("/report `[스트리머]`",           "주간 분석 리포트 (분쵸)"),
-            ("/youtube `[스트리머]`",          "유튜브 채널 통계 (분쵸)"),
-            ("/schedule `[기간]`",             "스케줄 조회 (스쵸)"),
-        ]
-        embed.add_field(
-            name="📌 핵심 운영",
-            value="\n".join(f"**{c}** — {d}" for c, d in core),
-            inline=False,
-        )
+        view = HelpView(owner_id=interaction.user.id)
+        embed = view._build_embed()
 
-        # ── 자금 / 토큰 ──
-        money_cmds = [
-            ("/money",        "현재 자금·크레딧 현황 (인쵸)"),
-            ("/settlement",   "이번 달 월말정산 + 다음 달 예상"),
-        ]
-        embed.add_field(
-            name="💰 자금 / 토큰",
-            value="\n".join(f"**{c}** — {d}" for c, d in money_cmds),
-            inline=False,
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+            ephemeral=True,
         )
-
-        # ── 스트리머 관리 ──
-        sm = [
-            ("/streamer_add",  "신규 스트리머 등록"),
-            ("/streamer_list", "등록 스트리머 목록"),
-        ]
-        embed.add_field(
-            name="👥 스트리머",
-            value="\n".join(f"**{c}** — {d}" for c, d in sm),
-            inline=False,
-        )
-
-        # ── 개쵸 R&D ──
-        rnd_cmds = [
-            ("/rnd_health",     "봇 건강 상태 자가 진단"),
-            ("/rnd_diagnose",   "이슈/버그 진단 (Claude Opus)"),
-            ("/rnd_design",     "신규 봇 설계서 생성"),
-            ("/rnd_errors",     "최근 60분 에러 리포트"),
-            ("/rnd_announce",   "R&D 채널에 공지 게시"),
-        ]
-        embed.add_field(
-            name="🔧 개쵸 R&D",
-            value="\n".join(f"**{c}** — {d}" for c, d in rnd_cmds),
-            inline=False,
-        )
-
-        # ── 모델 티어링 ──
-        model_cmds = [
-            ("/model_status",  "현재 티어링·에이전트 매핑 조회"),
-            ("/model_set",     "티어의 모델 변경 (예: light → gpt-4o-mini)"),
-            ("/model_agent",   "에이전트의 기본 티어 변경"),
-            ("/model_reset",   "모델 설정 초기화 (재부팅 권고)"),
-        ]
-        embed.add_field(
-            name="🧠 모델 관리",
-            value="\n".join(f"**{c}** — {d}" for c, d in model_cmds),
-            inline=False,
-        )
-
-        # ── 관찰성 ──
-        obs = [
-            ("/rawdata `[모드]`",   "파이프라인 트레이스: off / ephemeral / channel / both"),
-            ("/rawdata_channel",   "트레이스 영구 기록 채널 지정"),
-        ]
-        embed.add_field(
-            name="🔬 관찰성",
-            value="\n".join(f"**{c}** — {d}" for c, d in obs),
-            inline=False,
-        )
-
-        embed.set_footer(
-            text="현재 모델: router·light=gpt-5.4-nano · standard·premium=opus 4.7 · "
-                 "research=sonar-pro · vision=gpt-4o"
-        )
-
-        # ── 고정비 ──
-        fc = [
-            ("/fixedcost_list",    "고정비 납부 일정 목록"),
-            ("/fixedcost_add",     "고정비 등록"),
-            ("/fixedcost_remove",  "고정비 삭제"),
-            ("/fixedcost_paid",    "납부 완료 기록"),
-        ]
-        embed.add_field(
-            name="💳 고정비",
-            value="\n".join(f"**{c}** — {d}" for c, d in fc),
-            inline=False,
-        )
-
-        # ── 스케줄 관리 ──
-        sch = [
-            ("/schedule `[기간]`",          "스케줄 조회"),
-            ("/schedule_add",               "스케줄 등록"),
-            ("/schedule_edit `[ID]`",       "스케줄 수정"),
-            ("/schedule_remove `[ID]`",     "스케줄 삭제"),
-        ]
-        embed.add_field(
-            name="📅 스케줄 관리",
-            value="\n".join(f"**{c}** — {d}" for c, d in sch),
-            inline=False,
-        )
-
-        # ── 시스템 ──
-        sys_cmds = [
-            ("/uptime",   "봇 가동 시간 확인"),
-            ("/reboot",   "봇 재부팅 (Railway 자동 재시작)"),
-        ]
-        embed.add_field(
-            name="⚙️ 시스템",
-            value="\n".join(f"**{c}** — {d}" for c, d in sys_cmds),
-            inline=False,
-        )
-
-        # ── 설정 ──
-        cfg = [
-            ("/config_ai",        "AI API 키 (OpenRouter 필수 + Perplexity·YouTube 선택)"),
-            ("/config_notion",    "Notion 토큰 + DB ID"),
-            ("/config_discord",   "오퍼레이터 유저 ID"),
-            ("/config_status",    "현재 API 키 설정 현황"),
-            ("/rawdata_channel",  "Raw Data 트레이스 채널"),
-            ("/rnd_channel",      "개쵸 R&D 공지 채널"),
-            ("/forum_channel",    "해쵸 포럼 세션 채널"),
-        ]
-        embed.add_field(
-            name="⚙️ 설정",
-            value="\n".join(f"**{c}** — {d}" for c, d in cfg),
-            inline=False,
-        )
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def _streamer_list_embed() -> discord.Embed:
