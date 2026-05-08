@@ -290,3 +290,62 @@ def _start_rnd_scheduler(bot_instance):
     )
 
     scheduler.start()
+
+# ═══════════════════════════════════════════════════════════════════
+# 스케줄러 헬퍼 함수들 (on_ready에서 호출)
+# ═══════════════════════════════════════════════════════════════════
+
+def _start_fixed_costs_scheduler(bot_instance):
+    """매일 09:00 고정비 납부 D-3 알림."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from modules.fixed_costs import check_upcoming_payments
+
+    scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+    scheduler.add_job(
+        check_upcoming_payments,
+        CronTrigger(hour=9, minute=0),
+        args=[bot_instance],
+        id="fixed_costs_alert",
+        replace_existing=True,
+    )
+    scheduler.start()
+
+
+def _start_rnd_scheduler(bot_instance):
+    """개쵸 R&D 자동화: 08시 건강체크 + 10분마다 에러체크 + 자정 카운터 리셋."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+    from modules.rnd import daily_health_report
+    from utils.self_monitor import check_error_thresholds, reset_counters
+
+    scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+
+    # 매일 08:00 건강 리포트
+    scheduler.add_job(
+        daily_health_report,
+        CronTrigger(hour=8, minute=0),
+        args=[bot_instance],
+        id="daily_health",
+        replace_existing=True,
+    )
+
+    # 10분마다 에러 임계치 체크
+    scheduler.add_job(
+        check_error_thresholds,
+        IntervalTrigger(minutes=10),
+        args=[bot_instance],
+        id="error_threshold_check",
+        replace_existing=True,
+    )
+
+    # 매일 자정 에러 카운터 리셋
+    scheduler.add_job(
+        reset_counters,
+        CronTrigger(hour=0, minute=0),
+        id="error_counter_reset",
+        replace_existing=True,
+    )
+
+    scheduler.start()
