@@ -53,76 +53,22 @@ def is_cho():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# /ask 헬퍼 함수들 (모듈 레벨)
+# /ask 응답 헬퍼 함수들 (모듈 레벨)
+# 실제 전송은 utils/message_splitter.py에 위임
 # ═══════════════════════════════════════════════════════════════════
-
-def _is_embed_valid(embed: discord.Embed) -> bool:
-    """Discord Embed 제약 조건 검증."""
-    if embed is None:
-        return False
-    has_content = (
-        bool(embed.title) or
-        bool(embed.description) or
-        len(embed.fields) > 0
-    )
-    if not has_content:
-        return False
-    if embed.title and len(embed.title) > 256:
-        return False
-    if embed.description and len(embed.description) > 4096:
-        return False
-    total = len(embed.title or "") + len(embed.description or "")
-    for f in embed.fields:
-        total += len(f.name or "") + len(f.value or "")
-    if total > 6000:
-        return False
-    return True
-
-
-async def _send_as_file(
-    interaction: discord.Interaction,
-    embed: discord.Embed,
-) -> bool:
-    """Embed → 텍스트 파일로 변환 후 첨부 전송."""
-    try:
-        lines = []
-        if embed.title:
-            lines.append(f"# {embed.title}\n")
-        if embed.description:
-            lines.append(embed.description + "\n")
-        for f in embed.fields:
-            lines.append(f"\n## {f.name}\n{f.value}\n")
-        if embed.footer and embed.footer.text:
-            lines.append(f"\n---\n{embed.footer.text}")
-
-        content = "\n".join(lines)
-        file = discord.File(
-            fp=io.BytesIO(content.encode("utf-8")),
-            filename=f"response_{datetime.now():%H%M%S}.md",
-        )
-        notice = discord.Embed(
-            title="📎 응답이 길어서 파일로 전달합니다",
-            description=f"{embed.title or '응답'}\n(Embed 크기 초과)",
-            color=0xEAB308,
-        )
-        await interaction.followup.send(embed=notice, file=file)
-        return True
-    except Exception as e:
-        log.error(f"파일 폴백 실패: {e}")
-        return False
-
 
 async def _dm_fallback(
     interaction: discord.Interaction,
     embed: discord.Embed,
 ) -> bool:
     """Interaction 만료 시 Cho에게 DM으로 전송."""
+    from utils.message_splitter import send_long_embed
     try:
         await interaction.user.send(
             content="⚠️ 응답이 지연되어 DM으로 전달합니다.",
-            embed=embed,
         )
-        return True
+        # DM 채널로 전송 (분할 포함)
+        return await send_long_embed(interaction.user, embed)
     except Exception as e:
         log.error(f"DM 폴백 실패: {e}")
         return False
@@ -132,22 +78,15 @@ async def _safe_send_embed(
     interaction: discord.Interaction,
     embed: discord.Embed,
 ) -> bool:
-    """followup.send 안전 래퍼."""
+    """followup.send 안전 래퍼 (자동 분할 지원)."""
+    from utils.message_splitter import send_long_embed
     try:
-        if not _is_embed_valid(embed):
-            return await _send_as_file(interaction, embed)
-        await interaction.followup.send(embed=embed)
-        return True
+        return await send_long_embed(interaction, embed)
     except discord.NotFound:
         log.warning("Interaction 만료 — DM 폴백 시도")
         return await _dm_fallback(interaction, embed)
-    except discord.HTTPException as e:
-        log.error(f"followup.send HTTPException: {e}")
-        if e.status == 400:
-            return await _send_as_file(interaction, embed)
-        return False
     except Exception as e:
-        log.exception(f"followup.send 예외: {e}")
+        log.exception(f"_safe_send_embed 예외: {e}")
         return False
 
 
@@ -156,15 +95,16 @@ async def _safe_followup(
     embed: discord.Embed,
     ephemeral: bool = False,
 ) -> None:
-    """오류 안전 followup (예외 시 무시)."""
+    """오류 안전 followup (예외 시 무시, 자동 분할 지원)."""
+    from utils.message_splitter import send_long_embed
     try:
-        await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        await send_long_embed(interaction, embed, ephemeral=ephemeral)
     except Exception as e:
         log.warning(f"_safe_followup 실패: {e}")
 
 
 def _build_fallback_embed(query: str, agent_results: dict) -> discord.Embed:
-    """응답 생성 실패 시 친절한 안내 Embed."""
+    """응답 생성 실패 시 안내 Embed."""
     embed = discord.Embed(
         title="🤔 답변을 생성하기 어려웠어요",
         description=(
@@ -181,9 +121,8 @@ def _build_fallback_embed(query: str, agent_results: dict) -> discord.Embed:
         name="💡 다시 시도해보실 점",
         value=(
             "• **더 구체적인 질문**으로 재시도 (스트리머/기간/형식 명시)\n"
-            "• **전용 커맨드** 사용 (`/money`, `/schedule`, `/youtube` 등)\n"
-            "• `/rawdata ephemeral` → 파이프라인 확인\n"
-            "• 응답이 Discord 제한(6000자) 초과했을 수 있음"
+            "• **전용 커맨드** 사용 (`/money`, `/schedule` 등)\n"
+            "• `/rawdata ephemeral` → 파이프라인 확인"
         ),
         inline=False,
     )
@@ -421,11 +360,15 @@ async def setup_commands(bot: commands.Bot):
             view.clear_items()
             view.stop()
 
-            try:
-                await progress_msg.edit(embed=final_embed, view=None)
+            # ✅ 새 코드 (자동 분할 지원)
+            from utils.message_splitter import edit_long_embed
+
+            # View 제거 + 자동 분할 편집
+            ok = await edit_long_embed(progress_msg, final_embed, view=None)
+            if ok:
                 step("응답 전송", "ok", f"총 {elapsed_total}ms")
-            except discord.HTTPException as e:
-                log.warning(f"progress 메시지 편집 실패: {e} → 새 메시지 전송")
+            else:
+                step("응답 전송", "fail", "edit 실패 → 새 메시지", "E012")
                 await _safe_send_embed(interaction, final_embed)
 
             if summary_embed and agent_results:
@@ -456,7 +399,8 @@ async def setup_commands(bot: commands.Bot):
                 color=0xF97316,
             )
             try:
-                await progress_msg.edit(embed=timeout_embed, view=None)
+                from utils.message_splitter import edit_long_embed
+                await edit_long_embed(progress_msg, timeout_embed, view=None)
             except Exception:
                 await _safe_followup(interaction, embed=timeout_embed)
 
@@ -480,7 +424,8 @@ async def setup_commands(bot: commands.Bot):
 
             err_embed = embed_error("오류", str(e)[:1500])
             try:
-                await progress_msg.edit(embed=err_embed, view=None)
+                from utils.message_splitter import edit_long_embed
+                await edit_long_embed(progress_msg, err_embed, view=None)
             except Exception:
                 await _safe_followup(interaction, embed=err_embed)
 

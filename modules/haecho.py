@@ -190,7 +190,7 @@ async def _summarize(query: str, agent_results: dict) -> discord.Embed:
         )
         embed = discord.Embed(
             title="🎯 해쵸 — 총괄 브리핑",
-            description=result["content"][:3500],
+            description=result["content"],
             color=0x1E293B,
         )
         embed.set_footer(
