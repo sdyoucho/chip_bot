@@ -31,7 +31,7 @@ PRECONDENSE_SYSTEM = """당신은 사전 정리 도우미입니다.
 
 # ── Agent 핸들러 레지스트리 ─────────────────────────────────────────
 async def _call_agent(name: str, query: str, streamer: str = "") -> tuple[discord.Embed, str]:
-    """각 agent 호출 → (Embed, raw 텍스트)"""
+    """각 agent 호출 → (Embed, raw 텍스트). 실패해도 반드시 유효한 tuple 반환."""
     from modules import (
         chzzk_monitor, youtube_analytics, weekly_report,
         competitor_analysis, content_suggest, schedule,
@@ -48,20 +48,52 @@ async def _call_agent(name: str, query: str, streamer: str = "") -> tuple[discor
         "planning":   lambda: planning.create_document(query, streamer),
         "rnd":        lambda: rnd.handle_query(query),
         "design":     lambda: design.handle_query(query),
-}
+    }
     handler = handlers.get(name)
     if not handler:
-        return discord.Embed(title=f"? {name}", description="unknown"), ""
+        err_embed = discord.Embed(
+            title=f"❓ 알 수 없는 에이전트",
+            description=f"`{name}` 에이전트를 찾을 수 없습니다.",
+            color=0xEAB308,
+        )
+        return err_embed, f"unknown agent: {name}"
+
     try:
         embed = await handler()
-        raw = f"{embed.title}\n\n{embed.description or ''}"
+        # 🛡️ 반환값 유효성 검증
+        if embed is None or not isinstance(embed, discord.Embed):
+            log.warning(f"agent {name}가 유효하지 않은 값 반환: {type(embed)}")
+            err_embed = discord.Embed(
+                title=f"⚠️ {name} 응답 형식 오류",
+                description=f"에이전트가 예상치 못한 형식을 반환했습니다.",
+                color=0xEAB308,
+            )
+            return err_embed, str(embed)
+
+        # raw 텍스트 추출
+        raw_parts = []
+        if embed.title:
+            raw_parts.append(embed.title)
+        if embed.description:
+            raw_parts.append(embed.description)
         for f in embed.fields:
-            raw += f"\n\n[{f.name}]\n{f.value}"
+            raw_parts.append(f"[{f.name}]\n{f.value}")
+        raw = "\n\n".join(raw_parts)
+
         return embed, raw
+
     except Exception as e:
-        log.exception(f"agent {name} 실패")
-        err = discord.Embed(title=f"❌ {name}", description=str(e), color=0xE11D48)
-        return err, str(e)
+        log.exception(f"agent {name} 실행 실패")
+        err = discord.Embed(
+            title=f"❌ {name} 실행 중 오류",
+            description=(
+                f"**오류 내용**: {str(e)[:500]}\n\n"
+                f"질문을 조금 다르게 표현하거나, `/ask 개쵸 {name} 문제 확인`으로 "
+                f"개쵸에게 이슈를 공유해주세요."
+            ),
+            color=0xE11D48,
+        )
+        return err, f"error: {e}"
 
 
 async def _precondense(agent_name: str, raw: str) -> str:

@@ -76,7 +76,31 @@ async def on_ready():
         from utils.restart_manager import setup_auto_restart
         setup_auto_restart(bot, hour=4, minute=0)
     except Exception as e:
-        log.warning(f"자동 재부팅 스케줄 실패: {e}")    
+        log.warning(f"자동 재부팅 스케줄 실패: {e}")
+
+        # ── 개쵸: R&D 자동화 스케줄러 ─────────────────────────────────
+    try:
+        _start_rnd_scheduler(bot)
+        log.info("개쵸 R&D 스케줄러 시작")
+    except Exception as e:
+        log.warning(f"개쵸 스케줄러 시작 실패: {e}")
+
+    # ── 배포 알림 (R&D 채널에) ────────────────────────────────────
+    try:
+        from modules.rnd import notify_update
+        asyncio.create_task(notify_update(
+            bot,
+            version=datetime.now().strftime("build-%Y%m%d-%H%M"),
+            changes=[
+                "개쵸 R&D 확장 (헬스체크/진단/설계서/공지)",
+                "고정비 납부 관리 (매일 09:00 알림)",
+                "스케줄 CRUD 커맨드",
+                "자동 재부팅 (매일 04:00)",
+                "/ask 응답 누락 버그 수정",
+            ],
+        ))
+    except Exception as e:
+        log.warning(f"배포 알림 실패: {e}")       
 
 
 async def _sync_all_guilds():
@@ -130,7 +154,16 @@ async def on_guild_remove(guild: discord.Guild):
 
 @bot.event
 async def on_error(event, *args, **kwargs):
+    import traceback
+    from utils.self_monitor import record_error
+
+    tb_str = traceback.format_exc()
     log.exception(f"이벤트 오류: {event}")
+    record_error(
+        category=f"event:{event}",
+        message=str(args[0]) if args else event,
+        traceback_str=tb_str,
+    )
 
 
 # ── 스케줄러 ─────────────────────────────────────────────────────────
@@ -224,4 +257,36 @@ def _start_fixed_costs_scheduler(bot_instance):
         args=[bot_instance],
         id="fixed_costs_alert", replace_existing=True,
     )
+    scheduler.start()
+
+def _start_rnd_scheduler(bot_instance):
+    """개쵸 R&D 자동화 스케줄러."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+    from modules.rnd import daily_health_report
+    from utils.self_monitor import check_error_thresholds, reset_counters
+
+    scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+
+    # 매일 08:00 건강 체크 공지
+    scheduler.add_job(
+        daily_health_report, CronTrigger(hour=8, minute=0),
+        args=[bot_instance],
+        id="daily_health", replace_existing=True,
+    )
+
+    # 10분마다 에러 임계치 체크
+    scheduler.add_job(
+        check_error_thresholds, IntervalTrigger(minutes=10),
+        args=[bot_instance],
+        id="error_threshold_check", replace_existing=True,
+    )
+
+    # 자정마다 에러 카운터 리셋
+    scheduler.add_job(
+        reset_counters, CronTrigger(hour=0, minute=0),
+        id="error_counter_reset", replace_existing=True,
+    )
+
     scheduler.start()
