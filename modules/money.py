@@ -218,3 +218,83 @@ def _sparkline(values: list[float]) -> str:
     lo, hi = min(values), max(values)
     span = (hi - lo) or 1
     return "".join(blocks[int((v - lo) / span * 7)] for v in values)
+
+# ── 자연어 자금 질의 처리 ─────────────────────────────────────────
+async def handle_query(query: str) -> discord.Embed:
+    """
+    자연어 자금 질의 처리 — OpenRouter light 티어 (gpt-5.4-nano).
+    /ask 명령이나 해쵸 오케스트레이션에서 호출됨.
+    예: "이번 달 얼마 썼어?", "해쵸가 제일 돈 많이 쓰는 agent야?"
+    """
+    from utils.openrouter_client import chat
+    from utils.notion_client import list_streamers
+
+    try:
+        # 컨텍스트 수집
+        credits = await get_remaining_credits()
+        month_total = await get_monthly_total()
+        by_agent = await get_by_agent()
+        by_model = await get_by_model()
+        streamers = await list_streamers()
+        n = len(streamers)
+
+        # LLM에 전달할 컨텍스트
+        agent_breakdown = (
+            "\n".join(f"  - {a}: ${c:.4f}"
+                      for a, c in sorted(by_agent.items(), key=lambda x: -x[1]))
+            if by_agent else "  - (데이터 없음)"
+        )
+        model_breakdown = (
+            "\n".join(f"  - {m.split('/')[-1]}: ${c:.4f}"
+                      for m, c in sorted(by_model.items(), key=lambda x: -x[1])[:5])
+            if by_model else "  - (데이터 없음)"
+        )
+
+        context = f"""[현재 재무 스냅샷]
+• 등록 스트리머: {n}명
+• OpenRouter 크레딧: 사용 ${credits['usage']:.4f} / 총 ${credits['total']:.4f} ({credits['usage_ratio']*100:.1f}%)
+• 잔여 크레딧: ${credits['remaining']:.4f}
+• 이번 달 AI 토큰 누적: ${month_total:.4f} (≈ ₩{int(month_total * 1380):,})
+
+[에이전트별 누적 비용]
+{agent_breakdown}
+
+[모델별 누적 비용 (상위 5개)]
+{model_breakdown}
+
+[월 고정비]
+• Railway Hobby: ₩{FIXED_COSTS_KRW['Railway Hobby']:,}
+• Claude Code Max: ₩{FIXED_COSTS_KRW['Claude Code Max']:,}
+• ChatGPT Plus: ₩{FIXED_COSTS_KRW['ChatGPT Plus']:,}
+• 합계: ₩{sum(FIXED_COSTS_KRW.values()):,}
+"""
+
+        result = await chat(
+            messages=[
+                {"role": "system", "content":
+                    "당신은 '인쵸'입니다. Cho의 매니지먼트 봇 자금 분석 전문가로서, "
+                    "아래 실제 데이터만 근거로 답변하세요. 추측 금지. "
+                    "숫자는 반드시 원문 그대로 인용하고, 필요 시 한화(원) 환산을 곁들이세요.\n\n"
+                    + context},
+                {"role": "user", "content": query},
+            ],
+            agent="inchyo",
+            max_tokens=600,
+            temperature=0.3,
+        )
+
+        embed = discord.Embed(
+            title="💰 인쵸 — 자금 분석",
+            description=result["content"][:3500],
+            color=0x059669,
+        )
+        embed.set_footer(
+            text=f"{result['model'].split('/')[-1]} · "
+                 f"${result['cost']:.5f} · 인쵸"
+        )
+        return embed
+
+    except Exception as e:
+        log.error(f"인쵸 자연어 질의 오류: {e}")
+        # 오류 시 기본 요약으로 폴백
+        return await get_financial_summary()

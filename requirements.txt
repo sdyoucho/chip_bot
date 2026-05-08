@@ -1,26 +1,20 @@
-# Cho's 매니지먼트 봇 — 패키지 목록
-# pip install -r requirements.txt
+# Cho's 매니지먼트 봇 — 정리된 패키지 목록
 
 # Discord
 discord.py==2.3.2
 
-# Notion
+# Notion (유지 — 데이터 저장용)
 notion-client==2.2.1
 
-# Google / Gemini / YouTube
-google-generativeai==0.8.3
+# OpenRouter용 (aiohttp만 있으면 됨)
+aiohttp==3.11.11
+
+# Google OAuth + YouTube (유지 — YouTube Analytics는 OpenRouter가 대체 못함)
 google-auth==2.37.0
 google-auth-oauthlib==1.2.1
 google-api-python-client==2.154.0
 
-# OpenAI
-openai==1.59.6
-
-# Anthropic
-anthropic==0.96.0
-
 # HTTP
-aiohttp==3.11.11
 requests==2.32.3
 
 # 환경변수
@@ -29,7 +23,9 @@ python-dotenv==1.0.1
 # 스케줄러
 apscheduler==3.10.4
 
+# DB (비용 트래킹)
+aiosqlite>=0.20.0
+
 # 유틸
 python-dateutil==2.9.0
 pytz==2024.2
-aiosqlite>=0.20.0

@@ -44,11 +44,11 @@ async def _call_agent(name: str, query: str, streamer: str = "") -> tuple[discor
         "competitor": lambda: competitor_analysis.run_analysis(streamer or "all"),
         "suggest":    lambda: content_suggest.generate_suggestions(query, streamer),
         "schedule":   lambda: schedule.handle_schedule(query),
-        "money":      lambda: money.get_financial_summary(),
+        "money":      lambda: money.handle_query(query) if query else money.get_financial_summary(),
         "planning":   lambda: planning.create_document(query, streamer),
         "rnd":        lambda: rnd.handle_query(query),
         "design":     lambda: design.handle_query(query),
-    }
+}
     handler = handlers.get(name)
     if not handler:
         return discord.Embed(title=f"? {name}", description="unknown"), ""

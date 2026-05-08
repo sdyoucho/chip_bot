@@ -26,26 +26,25 @@ CHO_USER_ID = int(os.getenv("CHO_USER_ID", "0"))
 
 class _AIKeysModal(discord.ui.Modal, title="AI API 키 설정"):
     openrouter = discord.ui.TextInput(
-        label="OpenRouter API Key  (통합 게이트웨이 — 필수)",
+        label="OpenRouter API Key  (필수 — 모든 LLM 통합)",
         placeholder="sk-or-v1-...",
-        required=False,
+        required=True,
+        style=discord.TextStyle.short,
         max_length=200,
     )
-    gemini = discord.ui.TextInput(
-        label="Gemini API Key  (레거시·폴백용)",
-        required=False, max_length=200,
-    )
-    anthropic = discord.ui.TextInput(
-        label="Anthropic API Key  (OpenRouter 미사용 시)",
-        required=False, max_length=200,
-    )
-    openai = discord.ui.TextInput(
-        label="OpenAI API Key  (OpenRouter 미사용 시)",
-        required=False, max_length=200,
-    )
     perplexity = discord.ui.TextInput(
-        label="Perplexity API Key  (분쵸 직접 호출)",
-        required=False, max_length=200,
+        label="Perplexity API Key  (선택 — 분쵸 직접 호출)",
+        placeholder="pplx-... (OpenRouter로 대체하려면 비워두세요)",
+        required=False,
+        style=discord.TextStyle.short,
+        max_length=200,
+    )
+    youtube = discord.ui.TextInput(
+        label="YouTube Data API v3 Key  (유튜브 통계용)",
+        placeholder="AIza...",
+        required=False,
+        style=discord.TextStyle.short,
+        max_length=200,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -53,10 +52,8 @@ class _AIKeysModal(discord.ui.Modal, title="AI API 키 설정"):
         updated = []
         mapping = [
             (self.openrouter.value, "OPENROUTER_API_KEY", "OpenRouter"),
-            (self.gemini.value,     "GEMINI_API_KEY",     "Gemini"),
-            (self.anthropic.value,  "ANTHROPIC_API_KEY",  "Anthropic"),
-            (self.openai.value,     "OPENAI_API_KEY",     "OpenAI"),
             (self.perplexity.value, "PERPLEXITY_API_KEY", "Perplexity"),
+            (self.youtube.value,    "YOUTUBE_API_KEY",    "YouTube"),
         ]
         for val, env_key, label in mapping:
             if val.strip():
