@@ -276,7 +276,7 @@ async def setup_commands(bot: commands.Bot):
     """봇에 슬래시 커맨드 트리 등록."""
 
     # ───────────────────────────────────────────────────────────
-    # /ask — 자연어 통합 (정지 버튼 + 진행 업데이트)
+    # /ask — 자연어 통합 (정지 버튼 + 진행 업데이트 + 자동 분할)
     # ───────────────────────────────────────────────────────────
     @bot.tree.command(name="ask", description="자연어로 무엇이든 물어보세요")
     @is_cho()
@@ -295,6 +295,7 @@ async def setup_commands(bot: commands.Bot):
         from modules.haecho import orchestrate
         from utils.forum_publisher import publish_session
         from bot.interactive import AskProgressView, build_progress_embed
+        from utils.message_splitter import edit_long_embed
 
         start_trace()
         t_start = time.monotonic()
@@ -347,11 +348,15 @@ async def setup_commands(bot: commands.Bot):
             elapsed_total = int((time.monotonic() - t_start) * 1000)
             final_embed = summary_embed
 
+            # 🛡️ summary_embed가 없으면 첫 번째 유효한 agent embed 선택
             if not final_embed and agent_results:
                 for _, result_tuple in agent_results.items():
-                    if isinstance(result_tuple, tuple) and result_tuple[0]:
-                        if _is_embed_valid(result_tuple[0]):
-                            final_embed = result_tuple[0]
+                    if isinstance(result_tuple, tuple) and result_tuple[0] is not None:
+                        candidate = result_tuple[0]
+                        # 최소 조건: title / description / fields 중 하나라도 있으면 OK
+                        # (길이 검증은 edit_long_embed가 자동 처리)
+                        if candidate.title or candidate.description or candidate.fields:
+                            final_embed = candidate
                             break
 
             if not final_embed:
@@ -360,10 +365,7 @@ async def setup_commands(bot: commands.Bot):
             view.clear_items()
             view.stop()
 
-            # ✅ 새 코드 (자동 분할 지원)
-            from utils.message_splitter import edit_long_embed
-
-            # View 제거 + 자동 분할 편집
+            # 🚀 자동 분할 편집 (2,000/4,096/6,000자 제한 자동 대응)
             ok = await edit_long_embed(progress_msg, final_embed, view=None)
             if ok:
                 step("응답 전송", "ok", f"총 {elapsed_total}ms")
@@ -371,6 +373,7 @@ async def setup_commands(bot: commands.Bot):
                 step("응답 전송", "fail", "edit 실패 → 새 메시지", "E012")
                 await _safe_send_embed(interaction, final_embed)
 
+            # 포럼 병렬 발행
             if summary_embed and agent_results:
                 asyncio.create_task(publish_session(
                     bot,
@@ -399,7 +402,6 @@ async def setup_commands(bot: commands.Bot):
                 color=0xF97316,
             )
             try:
-                from utils.message_splitter import edit_long_embed
                 await edit_long_embed(progress_msg, timeout_embed, view=None)
             except Exception:
                 await _safe_followup(interaction, embed=timeout_embed)
@@ -424,7 +426,6 @@ async def setup_commands(bot: commands.Bot):
 
             err_embed = embed_error("오류", str(e)[:1500])
             try:
-                from utils.message_splitter import edit_long_embed
                 await edit_long_embed(progress_msg, err_embed, view=None)
             except Exception:
                 await _safe_followup(interaction, embed=err_embed)
