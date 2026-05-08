@@ -64,6 +64,20 @@ async def on_ready():
     except Exception as e:
         log.warning(f"인쵸 스케줄러 시작 실패: {e}")
 
+    # ── 고정비 납부 알림 (매일 9시) ─────────────────────────────
+    try:
+        _start_fixed_costs_scheduler(bot)
+        log.info("고정비 납부 알림 스케줄러 시작 (매일 09:00)")
+    except Exception as e:
+        log.warning(f"고정비 스케줄러 시작 실패: {e}")
+
+    # ── 자동 재부팅 (매일 04:00) ────────────────────────────────
+    try:
+        from utils.restart_manager import setup_auto_restart
+        setup_auto_restart(bot, hour=4, minute=0)
+    except Exception as e:
+        log.warning(f"자동 재부팅 스케줄 실패: {e}")    
+
 
 async def _sync_all_guilds():
     """참여 중인 모든 서버에 슬래시 커맨드 동기화 (즉시 반영)."""
@@ -197,3 +211,17 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+def _start_fixed_costs_scheduler(bot_instance):
+    """매일 09:00 고정비 납부 알림."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    from modules.fixed_costs import check_upcoming_payments
+
+    scheduler = AsyncIOScheduler(timezone="Asia/Seoul")
+    scheduler.add_job(
+        check_upcoming_payments, CronTrigger(hour=9, minute=0),
+        args=[bot_instance],
+        id="fixed_costs_alert", replace_existing=True,
+    )
+    scheduler.start()

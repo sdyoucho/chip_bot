@@ -589,6 +589,145 @@ async def setup_commands(bot: commands.Bot):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ═══════════════════════════════════════════════════════════════
+    # 고정비 관리
+    # ═══════════════════════════════════════════════════════════════
+    @bot.tree.command(name="fixedcost_list", description="고정비 납부 일정 목록")
+    @is_cho()
+    async def cmd_fixedcost_list(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        from modules.fixed_costs import list_fixed_costs
+        embed = await list_fixed_costs()
+        await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="fixedcost_add", description="고정비 등록")
+    @is_cho()
+    @app_commands.describe(
+        name="서비스 이름 (예: Railway Hobby)",
+        amount_krw="월 금액 (원)",
+        pay_day="매월 납부일 (1~31)",
+    )
+    async def cmd_fixedcost_add(
+        interaction: discord.Interaction,
+        name: str,
+        amount_krw: int,
+        pay_day: int,
+    ):
+        from modules.fixed_costs import add_cost
+        if not (1 <= pay_day <= 31):
+            await interaction.response.send_message(
+                embed=embed_error("입력 오류", "납부일은 1~31 사이"),
+                ephemeral=True,
+            )
+            return
+        msg = add_cost(name, amount_krw, pay_day)
+        await interaction.response.send_message(
+            embed=embed_info("💳 고정비 등록", msg), ephemeral=True
+        )
+
+    @bot.tree.command(name="fixedcost_remove", description="고정비 삭제")
+    @is_cho()
+    @app_commands.describe(name="삭제할 서비스 이름")
+    async def cmd_fixedcost_remove(interaction: discord.Interaction, name: str):
+        from modules.fixed_costs import remove_cost
+        msg = remove_cost(name)
+        await interaction.response.send_message(
+            embed=embed_info("💳 고정비 삭제", msg), ephemeral=True
+        )
+
+    @bot.tree.command(name="fixedcost_paid", description="고정비 납부 완료 기록")
+    @is_cho()
+    @app_commands.describe(name="납부 완료한 서비스 이름")
+    async def cmd_fixedcost_paid(interaction: discord.Interaction, name: str):
+        from modules.fixed_costs import mark_paid
+        msg = mark_paid(name)
+        await interaction.response.send_message(
+            embed=embed_info("💳 납부 완료", msg), ephemeral=True
+        )
+
+    # ═══════════════════════════════════════════════════════════════
+    # 스케줄 등록/수정/삭제
+    # ═══════════════════════════════════════════════════════════════
+    @bot.tree.command(name="schedule_add", description="스케줄 등록")
+    @is_cho()
+    @app_commands.describe(
+        title="일정 제목",
+        date="날짜 (예: 2026-05-15 또는 2026-05-15 14:00)",
+        memo="메모 (선택)",
+    )
+    async def cmd_schedule_add(
+        interaction: discord.Interaction,
+        title: str,
+        date: str,
+        memo: str = "",
+    ):
+        await interaction.response.defer(thinking=True)
+        from modules.schedule import add_schedule
+        embed = await add_schedule(title, date, memo)
+        await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="schedule_edit", description="스케줄 수정")
+    @is_cho()
+    @app_commands.describe(
+        short_id="/schedule에서 표시된 8자리 ID",
+        title="새 제목 (선택)",
+        date="새 날짜 (선택)",
+    )
+    async def cmd_schedule_edit(
+        interaction: discord.Interaction,
+        short_id: str,
+        title: str = "",
+        date: str = "",
+    ):
+        await interaction.response.defer(thinking=True)
+        from modules.schedule import update_schedule
+        embed = await update_schedule(short_id, title, date)
+        await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="schedule_remove", description="스케줄 삭제")
+    @is_cho()
+    @app_commands.describe(short_id="삭제할 스케줄 8자리 ID")
+    async def cmd_schedule_remove(interaction: discord.Interaction, short_id: str):
+        await interaction.response.defer(thinking=True)
+        from modules.schedule import delete_schedule
+        embed = await delete_schedule(short_id)
+        await interaction.followup.send(embed=embed)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 재부팅 / 가동 시간
+    # ═══════════════════════════════════════════════════════════════
+    @bot.tree.command(name="reboot", description="봇 재부팅 (Railway 자동 재시작)")
+    @is_cho()
+    @app_commands.describe(reason="재부팅 사유 (선택)")
+    async def cmd_reboot(interaction: discord.Interaction, reason: str = "수동 재부팅"):
+        from utils.restart_manager import request_restart
+        await interaction.response.send_message(
+            embed=embed_info(
+                "🔄 재부팅 시작",
+                f"사유: {reason}\n약 30초 후 재접속됩니다.",
+            ),
+            ephemeral=False,
+        )
+        # 응답 보낸 후 재부팅
+        asyncio.create_task(request_restart(bot, reason=reason, delay_seconds=5))
+
+    @bot.tree.command(name="uptime", description="봇 가동 시간 확인")
+    @is_cho()
+    async def cmd_uptime(interaction: discord.Interaction):
+        from utils.restart_manager import get_uptime, get_start_time
+        embed = discord.Embed(
+            title="⏱️ 봇 가동 현황",
+            color=0x4F46E5,
+        )
+        embed.add_field(name="가동 시간", value=get_uptime(), inline=False)
+        embed.add_field(
+            name="시작 시각",
+            value=f"<t:{int(get_start_time().timestamp())}:F>",
+            inline=False,
+        )
+        embed.add_field(name="서버 수", value=f"{len(bot.guilds)}개", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
     # ── /help ────────────────────────────────────────────────────────
     @bot.tree.command(name="help", description="사용 가능한 명령 목록")
@@ -677,6 +816,44 @@ async def setup_commands(bot: commands.Bot):
             text="현재 모델: router·light=gpt-5.4-nano · standard·premium=opus 4.7 · "
                  "research=sonar-pro · vision=gpt-4o"
         )
+
+        # ── 고정비 ──
+        fc = [
+            ("/fixedcost_list",    "고정비 납부 일정 목록"),
+            ("/fixedcost_add",     "고정비 등록"),
+            ("/fixedcost_remove",  "고정비 삭제"),
+            ("/fixedcost_paid",    "납부 완료 기록"),
+        ]
+        embed.add_field(
+            name="💳 고정비",
+            value="\n".join(f"**{c}** — {d}" for c, d in fc),
+            inline=False,
+        )
+
+        # ── 스케줄 관리 ──
+        sch = [
+            ("/schedule `[기간]`",          "스케줄 조회"),
+            ("/schedule_add",               "스케줄 등록"),
+            ("/schedule_edit `[ID]`",       "스케줄 수정"),
+            ("/schedule_remove `[ID]`",     "스케줄 삭제"),
+        ]
+        embed.add_field(
+            name="📅 스케줄 관리",
+            value="\n".join(f"**{c}** — {d}" for c, d in sch),
+            inline=False,
+        )
+
+        # ── 시스템 ──
+        sys_cmds = [
+            ("/uptime",   "봇 가동 시간 확인"),
+            ("/reboot",   "봇 재부팅 (Railway 자동 재시작)"),
+        ]
+        embed.add_field(
+            name="⚙️ 시스템",
+            value="\n".join(f"**{c}** — {d}" for c, d in sys_cmds),
+            inline=False,
+        )
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
