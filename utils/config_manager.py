@@ -27,7 +27,6 @@ _MANAGED_KEYS = {
 
     # ── Discord ──────────────────────────────────────────────
     "DISCORD_TOKEN":        ("Discord", "Discord 봇 토큰 (필수)"),
-    "DISCORD_GUILD_ID":     ("Discord", "서버 ID (슬래시 커맨드 즉시 동기화)"),
     "CHO_USER_ID":          ("Discord", "오퍼레이터 유저 ID (필수)"),
     "LOG_RAW_CHANNEL_ID":   ("Discord", "Raw Data 트레이스 기록 채널 ID"),
     "FORUM_CHANNEL_ID":     ("Discord", "포럼 채널 ID (해쵸 세션 기록용)"),

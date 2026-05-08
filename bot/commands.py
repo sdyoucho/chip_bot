@@ -125,10 +125,6 @@ class _NotionKeysModal(discord.ui.Modal, title="Notion 설정"):
 
 
 class _DiscordKeysModal(discord.ui.Modal, title="Discord 설정"):
-    guild_id = discord.ui.TextInput(
-        label="Discord Guild ID",
-        required=False, max_length=30,
-    )
     cho_user_id = discord.ui.TextInput(
         label="오퍼레이터 유저 ID",
         required=False, max_length=30,
