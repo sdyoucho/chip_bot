@@ -472,19 +472,67 @@ async def edit_long_embed(
 ) -> bool:
     """
     기존 메시지를 긴 Embed로 편집. 분할되면 추가 메시지로 이어 전송.
-
-    Args:
-        message: 편집할 메시지 (progress_msg)
-        embed: 새 Embed
-        view: View (None이면 제거)
-        interaction: 추가 메시지 전송용 Interaction (있으면 followup 사용)
-        query: 원본 쿼리
-        attach_files: .md 파일 첨부 여부
     """
     try:
         embeds = split_embed_to_parts(embed)
         if not embeds:
             log.warning("split_embed_to_parts가 빈 리스트 반환")
+            return False
+
+        total_length = _calculate_total_length(embed)
+        log.info(f"edit_long_embed: 총 {total_length}자 → {len(embeds)}개 Embed")
+
+        # 첫 Embed로 원본 메시지 편집
+        try:
+            await message.edit(embed=embeds[0], view=view, attachments=[])
+            log.info(f"첫 Embed 편집 성공 (1/{len(embeds)})")
+        except Exception as e:
+            log.error(f"메시지 편집 실패: {e} → 새 메시지로 폴백")
+            sender = interaction if interaction is not None else message.channel
+            ok = await _safe_send(sender, embed=embeds[0])
+            if not ok:
+                return False
+
+        # 추가 Embed들 전송
+        sender = interaction if interaction is not None else message.channel
+
+        for i, extra in enumerate(embeds[1:], start=2):
+            try:
+                ok = await _safe_send(sender, embed=extra)
+                if ok:
+                    log.info(f"추가 Embed 전송 성공 ({i}/{len(embeds)})")
+                else:
+                    log.warning(f"추가 Embed 전송 실패 ({i}/{len(embeds)})")
+            except Exception as e:
+                log.error(f"추가 Embed {i} 예외: {e}")
+
+        # 파일 첨부 (마지막)
+        if attach_files and total_length >= ATTACH_FILE_THRESHOLD:
+            try:
+                md_file = embed_to_md_file(embed, query=query)
+                ok = await _safe_send(
+                    sender,
+                    content="📎 **전체 내용 — 백업 파일**",
+                    file=md_file,
+                )
+                if ok:
+                    log.info(f"백업 .md 파일 첨부 성공 ({total_length}자)")
+                else:
+                    log.warning("백업 .md 파일 첨부 실패")
+            except Exception as e:
+                log.error(f"파일 첨부 실패: {e}")
+
+        return True
+
+    except Exception as e:
+        log.exception(f"edit_long_embed 실패: {e}")
+        # 마지막 폴백 — 새 메시지로 다시 시도
+        try:
+            sender = interaction if interaction is not None else message.channel
+            return await send_long_embed(
+                sender, embed, query=query, attach_files=attach_files,
+            )
+        except Exception:
             return False
 
         total_length = _calculate_total_length(embed)

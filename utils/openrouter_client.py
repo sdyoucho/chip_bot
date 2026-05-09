@@ -145,7 +145,7 @@ async def chat(
     agent: str = "haecho",
     tier: Optional[str] = None,
     model_override: Optional[str] = None,
-    max_tokens: int = 800,
+    max_tokens: int = 16000,
     temperature: float = 0.7,
     use_cache: bool = False,
     response_format: Optional[dict] = None,
