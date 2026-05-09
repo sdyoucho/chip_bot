@@ -1,6 +1,17 @@
 """
 bot/commands.py
 Discord 슬래시 커맨드 등록 + 헬퍼 함수.
+
+표준 패턴 (모든 신규 커맨드/봇 적용):
+    @bot.tree.command(...)
+    @is_cho()
+    async def cmd_xxx(interaction, ...):
+        await interaction.response.defer(thinking=True)
+        try:
+            embed = await some_module.handle()
+            await _send_response(interaction, embed, query="/xxx", attach_files=True)
+        except Exception as e:
+            await _send_error(interaction, error_title="XXX 오류", error=e)
 """
 
 # ═══════════════════════════════════════════════════════════════════
@@ -67,7 +78,6 @@ async def _dm_fallback(
         await interaction.user.send(
             content="⚠️ 응답이 지연되어 DM으로 전달합니다.",
         )
-        # DM 채널로 전송 (분할 포함)
         return await send_long_embed(interaction.user, embed)
     except Exception as e:
         log.error(f"DM 폴백 실패: {e}")
@@ -137,6 +147,124 @@ def _build_fallback_embed(query: str, agent_results: dict) -> discord.Embed:
     )
     embed.set_footer(text="개쵸(/rnd_diagnose)로 시스템 이슈 신고 가능")
     return embed
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 🌟 통합 응답 헬퍼 — 모든 커맨드/봇에서 사용
+# ═══════════════════════════════════════════════════════════════════
+
+async def _send_response(
+    interaction: discord.Interaction,
+    embed: discord.Embed | None,
+    *,
+    query: str = "",
+    attach_files: bool = True,
+    ephemeral: bool = False,
+    error_title: str = "오류",
+) -> bool:
+    """
+    모든 슬래시 커맨드의 표준 응답 전송 헬퍼.
+
+    동작:
+    1. embed가 None이면 안내 Embed 생성
+    2. 1,400자 초과 시 자동 분할 (Embed 여러 개로)
+    3. 1,500자 초과 시 .md 파일 자동 첨부
+    4. 모든 예외 흡수 + 자동 폴백
+
+    사용 패턴:
+        async def cmd_xxx(interaction, ...):
+            await interaction.response.defer(thinking=True)
+            try:
+                embed = await some_module.handle()
+                await _send_response(interaction, embed, query="/xxx", attach_files=True)
+            except Exception as e:
+                await _send_error(interaction, error_title="XXX 오류", error=e)
+    """
+    from utils.message_splitter import send_long_embed
+
+    if embed is None:
+        embed = discord.Embed(
+            title=f"⚠️ {error_title}",
+            description="응답을 생성하지 못했습니다.",
+            color=0xEAB308,
+        )
+
+    try:
+        return await send_long_embed(
+            interaction,
+            embed,
+            query=query,
+            attach_files=attach_files,
+            ephemeral=ephemeral,
+        )
+    except discord.NotFound:
+        log.warning(f"Interaction 만료 — DM 폴백 (query={query})")
+        try:
+            return await _dm_fallback(interaction, embed)
+        except Exception as e2:
+            log.error(f"DM 폴백 실패: {e2}")
+            return False
+    except Exception as e:
+        log.exception(f"_send_response 실패: {e}")
+        try:
+            await interaction.followup.send(
+                embed=embed_error("응답 전송 실패", str(e)[:1500]),
+                ephemeral=True,
+            )
+        except Exception:
+            pass
+        return False
+
+
+async def _send_error(
+    interaction: discord.Interaction,
+    *,
+    error_title: str,
+    error,
+    log_traceback: bool = True,
+) -> None:
+    """
+    표준 에러 응답 전송. 모든 커맨드의 except 블록에서 사용.
+
+    동작:
+    1. 로그 기록 (traceback 포함)
+    2. self_monitor에 자동 에러 수집
+    3. 사용자에게 Embed로 에러 안내
+
+    사용 패턴:
+        try:
+            ...
+        except Exception as e:
+            await _send_error(interaction, error_title="XXX 오류", error=e)
+    """
+    error_str = str(error) if not isinstance(error, str) else error
+
+    # 1) 로그
+    if log_traceback and isinstance(error, Exception):
+        log.exception(f"[{error_title}] {error_str}")
+    else:
+        log.error(f"[{error_title}] {error_str}")
+
+    # 2) 자동 에러 수집
+    try:
+        from utils.self_monitor import record_error
+        record_error(
+            category=error_title.replace(" ", "_").lower(),
+            message=error_str,
+            traceback_str=traceback.format_exc() if isinstance(error, Exception) else "",
+        )
+    except Exception:
+        pass
+
+    # 3) 사용자에게 안내
+    err_embed = embed_error(error_title, error_str[:1500])
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=err_embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=err_embed, ephemeral=True)
+    except Exception as e:
+        log.warning(f"_send_error 응답 실패: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -353,8 +481,6 @@ async def setup_commands(bot: commands.Bot):
                 for _, result_tuple in agent_results.items():
                     if isinstance(result_tuple, tuple) and result_tuple[0] is not None:
                         candidate = result_tuple[0]
-                        # 최소 조건: title / description / fields 중 하나라도 있으면 OK
-                        # (길이 검증은 edit_long_embed가 자동 처리)
                         if candidate.title or candidate.description or candidate.fields:
                             final_embed = candidate
                             break
@@ -365,8 +491,15 @@ async def setup_commands(bot: commands.Bot):
             view.clear_items()
             view.stop()
 
-            # 🚀 자동 분할 편집 (2,000/4,096/6,000자 제한 자동 대응)
-            ok = await edit_long_embed(progress_msg, final_embed, view=None)
+            # 🚀 자동 분할 편집 + .md 파일 첨부 (1,400자 단위)
+            ok = await edit_long_embed(
+                progress_msg,
+                final_embed,
+                view=None,
+                interaction=interaction,
+                query=query,
+                attach_files=True,
+            )
             if ok:
                 step("응답 전송", "ok", f"총 {elapsed_total}ms")
             else:
@@ -402,7 +535,14 @@ async def setup_commands(bot: commands.Bot):
                 color=0xF97316,
             )
             try:
-                await edit_long_embed(progress_msg, timeout_embed, view=None)
+                await edit_long_embed(
+                    progress_msg,
+                    timeout_embed,
+                    view=None,
+                    interaction=interaction,
+                    query=query,
+                    attach_files=False,
+                )
             except Exception:
                 await _safe_followup(interaction, embed=timeout_embed)
 
@@ -426,7 +566,14 @@ async def setup_commands(bot: commands.Bot):
 
             err_embed = embed_error("오류", str(e)[:1500])
             try:
-                await edit_long_embed(progress_msg, err_embed, view=None)
+                await edit_long_embed(
+                    progress_msg,
+                    err_embed,
+                    view=None,
+                    interaction=interaction,
+                    query=query,
+                    attach_files=False,
+                )
             except Exception:
                 await _safe_followup(interaction, embed=err_embed)
 
@@ -465,10 +612,14 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.defer(thinking=True)
         try:
             from modules.chzzk_monitor import get_current_status
-            await interaction.followup.send(embed=await get_current_status(streamer))
+            embed = await get_current_status(streamer)
+            await _send_response(
+                interaction, embed,
+                query=f"/monitor {streamer}",
+                attach_files=True,
+            )
         except Exception as e:
-            log.exception(e)
-            await interaction.followup.send(embed=embed_error("모니터링 오류", str(e)))
+            await _send_error(interaction, error_title="모니터링 오류", error=e)
 
     @bot.tree.command(name="report", description="주간 분석 리포트")
     @is_cho()
@@ -477,10 +628,14 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.defer(thinking=True)
         try:
             from modules.weekly_report import generate_report
-            await interaction.followup.send(embed=await generate_report(streamer))
+            embed = await generate_report(streamer)
+            await _send_response(
+                interaction, embed,
+                query=f"/report {streamer}",
+                attach_files=True,
+            )
         except Exception as e:
-            log.exception(e)
-            await interaction.followup.send(embed=embed_error("리포트 오류", str(e)))
+            await _send_error(interaction, error_title="리포트 오류", error=e)
 
     @bot.tree.command(name="youtube", description="유튜브 채널 통계")
     @is_cho()
@@ -489,10 +644,14 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.defer(thinking=True)
         try:
             from modules.youtube_analytics import get_channel_stats
-            await interaction.followup.send(embed=await get_channel_stats(streamer))
+            embed = await get_channel_stats(streamer)
+            await _send_response(
+                interaction, embed,
+                query=f"/youtube {streamer}",
+                attach_files=True,
+            )
         except Exception as e:
-            log.exception(e)
-            await interaction.followup.send(embed=embed_error("유튜브 오류", str(e)))
+            await _send_error(interaction, error_title="유튜브 오류", error=e)
 
     @bot.tree.command(name="schedule", description="스케줄 조회")
     @is_cho()
@@ -501,10 +660,14 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.defer(thinking=True)
         try:
             from modules.schedule import handle_schedule
-            await interaction.followup.send(embed=await handle_schedule(query))
+            embed = await handle_schedule(query)
+            await _send_response(
+                interaction, embed,
+                query=f"/schedule {query}",
+                attach_files=True,
+            )
         except Exception as e:
-            log.exception(e)
-            await interaction.followup.send(embed=embed_error("스케줄 오류", str(e)))
+            await _send_error(interaction, error_title="스케줄 오류", error=e)
 
     @bot.tree.command(name="money", description="자금 현황 및 API 비용")
     @is_cho()
@@ -512,17 +675,29 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.defer(thinking=True)
         try:
             from modules.money import get_financial_summary
-            await interaction.followup.send(embed=await get_financial_summary())
+            embed = await get_financial_summary()
+            await _send_response(
+                interaction, embed,
+                query="/money",
+                attach_files=True,
+            )
         except Exception as e:
-            log.exception(e)
-            await interaction.followup.send(embed=embed_error("자금 오류", str(e)))
+            await _send_error(interaction, error_title="자금 오류", error=e)
 
     @bot.tree.command(name="settlement", description="월말정산 + 다음 달 예상")
     @is_cho()
     async def cmd_settlement(interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        from modules.money import monthly_settlement
-        await interaction.followup.send(embed=await monthly_settlement())
+        try:
+            from modules.money import monthly_settlement
+            embed = await monthly_settlement()
+            await _send_response(
+                interaction, embed,
+                query="/settlement",
+                attach_files=True,
+            )
+        except Exception as e:
+            await _send_error(interaction, error_title="정산 오류", error=e)
 
     # ───────────────────────────────────────────────────────────
     # 스트리머 관리
@@ -546,15 +721,19 @@ async def setup_commands(bot: commands.Bot):
         try:
             from utils.notion_client import register_streamer
             await register_streamer(name, chzzk_url, youtube_url, soop_url)
-            await interaction.followup.send(embed=embed_info(
+            embed = embed_info(
                 f"✅ {name} 등록 완료",
                 f"치지직: {chzzk_url or '미등록'}\n"
                 f"유튜브: {youtube_url or '미등록'}\n"
                 f"SOOP: {soop_url or '미등록'}",
-            ))
+            )
+            await _send_response(
+                interaction, embed,
+                query=f"/streamer_add {name}",
+                attach_files=False,
+            )
         except Exception as e:
-            log.exception(e)
-            await interaction.followup.send(embed=embed_error("등록 오류", str(e)))
+            await _send_error(interaction, error_title="등록 오류", error=e)
 
     @bot.tree.command(name="streamer_list", description="등록된 스트리머 목록")
     @is_cho()
@@ -564,17 +743,17 @@ async def setup_commands(bot: commands.Bot):
             from utils.notion_client import list_streamers
             streamers = await list_streamers()
             if not streamers:
-                await interaction.followup.send(embed=embed_info(
-                    "스트리머 목록", "등록된 스트리머가 없습니다.",
-                ))
-                return
-            lines = "\n".join(f"• {s['name']}" for s in streamers)
-            await interaction.followup.send(embed=embed_info(
-                f"스트리머 목록 ({len(streamers)}명)", lines,
-            ))
+                embed = embed_info("스트리머 목록", "등록된 스트리머가 없습니다.")
+            else:
+                lines = "\n".join(f"• {s['name']}" for s in streamers)
+                embed = embed_info(f"스트리머 목록 ({len(streamers)}명)", lines)
+            await _send_response(
+                interaction, embed,
+                query="/streamer_list",
+                attach_files=False,
+            )
         except Exception as e:
-            log.exception(e)
-            await interaction.followup.send(embed=embed_error("목록 오류", str(e)))
+            await _send_error(interaction, error_title="목록 오류", error=e)
 
     # ───────────────────────────────────────────────────────────
     # 설정 — API/Notion/Discord
@@ -592,7 +771,6 @@ async def setup_commands(bot: commands.Bot):
     @bot.tree.command(name="config_discord", description="Discord 오퍼레이터 설정")
     async def cmd_config_discord(interaction: discord.Interaction):
         """⚠️ is_cho 데코레이터 없음 — 초기 설정 시 CHO_USER_ID가 없어도 호출 가능."""
-        # 대신 수동으로 "이미 설정됐으면 설정자만 허용" 체크
         cho_id_str = os.getenv("CHO_USER_ID", "").strip()
         if cho_id_str.isdigit() and interaction.user.id != int(cho_id_str):
             await interaction.response.send_message(
@@ -787,8 +965,16 @@ async def setup_commands(bot: commands.Bot):
     @is_cho()
     async def cmd_fixedcost_list(interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        from modules.fixed_costs import list_fixed_costs
-        await interaction.followup.send(embed=await list_fixed_costs())
+        try:
+            from modules.fixed_costs import list_fixed_costs
+            embed = await list_fixed_costs()
+            await _send_response(
+                interaction, embed,
+                query="/fixedcost_list",
+                attach_files=False,
+            )
+        except Exception as e:
+            await _send_error(interaction, error_title="고정비 목록 오류", error=e)
 
     @bot.tree.command(name="fixedcost_add", description="고정비 등록")
     @is_cho()
@@ -848,8 +1034,16 @@ async def setup_commands(bot: commands.Bot):
         title: str, date: str, memo: str = "",
     ):
         await interaction.response.defer(thinking=True)
-        from modules.schedule import add_schedule
-        await interaction.followup.send(embed=await add_schedule(title, date, memo))
+        try:
+            from modules.schedule import add_schedule
+            embed = await add_schedule(title, date, memo)
+            await _send_response(
+                interaction, embed,
+                query=f"/schedule_add {title}",
+                attach_files=False,
+            )
+        except Exception as e:
+            await _send_error(interaction, error_title="스케줄 등록 오류", error=e)
 
     @bot.tree.command(name="schedule_edit", description="스케줄 수정")
     @is_cho()
@@ -863,18 +1057,32 @@ async def setup_commands(bot: commands.Bot):
         short_id: str, title: str = "", date: str = "",
     ):
         await interaction.response.defer(thinking=True)
-        from modules.schedule import update_schedule
-        await interaction.followup.send(
-            embed=await update_schedule(short_id, title, date),
-        )
+        try:
+            from modules.schedule import update_schedule
+            embed = await update_schedule(short_id, title, date)
+            await _send_response(
+                interaction, embed,
+                query=f"/schedule_edit {short_id}",
+                attach_files=False,
+            )
+        except Exception as e:
+            await _send_error(interaction, error_title="스케줄 수정 오류", error=e)
 
     @bot.tree.command(name="schedule_remove", description="스케줄 삭제")
     @is_cho()
     @app_commands.describe(short_id="삭제할 8자리 ID")
     async def cmd_schedule_remove(interaction: discord.Interaction, short_id: str):
         await interaction.response.defer(thinking=True)
-        from modules.schedule import delete_schedule
-        await interaction.followup.send(embed=await delete_schedule(short_id))
+        try:
+            from modules.schedule import delete_schedule
+            embed = await delete_schedule(short_id)
+            await _send_response(
+                interaction, embed,
+                query=f"/schedule_remove {short_id}",
+                attach_files=False,
+            )
+        except Exception as e:
+            await _send_error(interaction, error_title="스케줄 삭제 오류", error=e)
 
     # ───────────────────────────────────────────────────────────
     # 개쵸 R&D
@@ -883,44 +1091,65 @@ async def setup_commands(bot: commands.Bot):
     @is_cho()
     async def cmd_rnd_health(interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        from modules.rnd import run_health_check, post_to_rnd_channel
-        embed = await run_health_check(bot)
-        await interaction.followup.send(embed=embed)
-        asyncio.create_task(post_to_rnd_channel(
-            bot, category="health",
-            title=f"수동 건강 체크 ({interaction.user.name})",
-            content="`/rnd_health` 실행",
-        ))
+        try:
+            from modules.rnd import run_health_check, post_to_rnd_channel
+            embed = await run_health_check(bot)
+            await _send_response(
+                interaction, embed,
+                query="/rnd_health",
+                attach_files=True,
+            )
+            asyncio.create_task(post_to_rnd_channel(
+                bot, category="health",
+                title=f"수동 건강 체크 ({interaction.user.name})",
+                content="`/rnd_health` 실행",
+            ))
+        except Exception as e:
+            await _send_error(interaction, error_title="건강 진단 오류", error=e)
 
     @bot.tree.command(name="rnd_diagnose", description="이슈 진단")
     @is_cho()
     @app_commands.describe(issue="문제 설명")
     async def cmd_rnd_diagnose(interaction: discord.Interaction, issue: str):
         await interaction.response.defer(thinking=True)
-        from modules.rnd import diagnose_issue, post_to_rnd_channel
-        embed = await diagnose_issue(issue)
-        await interaction.followup.send(embed=embed)
-        asyncio.create_task(post_to_rnd_channel(
-            bot, category="issue",
-            title=issue[:80],
-            content=(embed.description or "")[:3000],
-            author=interaction.user.name,
-        ))
+        try:
+            from modules.rnd import diagnose_issue, post_to_rnd_channel
+            embed = await diagnose_issue(issue)
+            await _send_response(
+                interaction, embed,
+                query=f"/rnd_diagnose {issue}",
+                attach_files=True,
+            )
+            asyncio.create_task(post_to_rnd_channel(
+                bot, category="issue",
+                title=issue[:80],
+                content=(embed.description or "")[:3000],
+                author=interaction.user.name,
+            ))
+        except Exception as e:
+            await _send_error(interaction, error_title="진단 오류", error=e)
 
     @bot.tree.command(name="rnd_design", description="신규 봇 설계서")
     @is_cho()
     @app_commands.describe(requirements="요구사항")
     async def cmd_rnd_design(interaction: discord.Interaction, requirements: str):
         await interaction.response.defer(thinking=True)
-        from modules.rnd import design_new_bot, post_to_rnd_channel
-        embed = await design_new_bot(requirements)
-        await interaction.followup.send(embed=embed)
-        asyncio.create_task(post_to_rnd_channel(
-            bot, category="design",
-            title=f"신규 봇 설계: {requirements[:50]}",
-            content=(embed.description or "")[:3500],
-            author=interaction.user.name,
-        ))
+        try:
+            from modules.rnd import design_new_bot, post_to_rnd_channel
+            embed = await design_new_bot(requirements)
+            await _send_response(
+                interaction, embed,
+                query=f"/rnd_design {requirements[:50]}",
+                attach_files=True,
+            )
+            asyncio.create_task(post_to_rnd_channel(
+                bot, category="design",
+                title=f"신규 봇 설계: {requirements[:50]}",
+                content=(embed.description or "")[:3500],
+                author=interaction.user.name,
+            ))
+        except Exception as e:
+            await _send_error(interaction, error_title="설계서 오류", error=e)
 
     @bot.tree.command(name="rnd_errors", description="최근 에러 요약")
     @is_cho()
