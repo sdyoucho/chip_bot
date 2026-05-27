@@ -1328,6 +1328,126 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ───────────────────────────────────────────────────────────
+    # 🛠️ 기쵸 자동 코드 수정
+    # ───────────────────────────────────────────────────────────
+    @bot.tree.command(name="code_propose", description="기쵸에게 코드 수정 요청")
+    @is_cho()
+    @app_commands.describe(
+        path="수정할 파일 경로 (예: modules/rnd.py)",
+        instruction="변경 요청 내용",
+    )
+    async def cmd_code_propose(
+        interaction: discord.Interaction,
+        path: str,
+        instruction: str,
+    ):
+        await interaction.response.defer(thinking=True)
+        try:
+            from modules.code_modifier import generate_change_proposal
+            from bot.code_approval_view import CodeApprovalView
+
+            proposal = await generate_change_proposal(path, instruction)
+
+            if not proposal["success"]:
+                await _send_error(
+                    interaction,
+                    error_title="변경안 생성 실패",
+                    error=proposal["error"],
+                )
+                return
+
+            # Embed 생성
+            embed = discord.Embed(
+                title=f"🛠️ 기쵸 — 코드 변경 제안 (ID: `{proposal['id']}`)",
+                description=(
+                    f"**파일**: `{proposal['path']}`\n"
+                    f"**요청**: {instruction[:300]}\n"
+                    f"**변경 라인**: {proposal['lines_changed']}줄\n\n"
+                    f"### 변경 요약\n{proposal['summary'][:1500]}"
+                ),
+                color=0xD97706,
+            )
+
+            # Diff 미리보기 (첫 2,000자)
+            diff_preview = proposal["diff"][:2000]
+            if diff_preview:
+                embed.add_field(
+                    name="📋 Diff 미리보기",
+                    value=f"```diff\n{diff_preview}\n```",
+                    inline=False,
+                )
+
+            embed.set_footer(text="⚠️ 코드를 검토하시고 승인 여부를 결정해주세요 (10분 후 자동 만료)")
+
+            view = CodeApprovalView(
+                proposal_id=proposal["id"],
+                owner_id=interaction.user.id,
+                timeout=600,
+            )
+
+            await _send_response(
+                interaction, embed,
+                query=f"/code_propose {path}",
+                attach_files=True,
+            )
+            # View가 있는 메시지를 별도로 전송
+            await interaction.followup.send(
+                content="👇 **승인/거부 버튼**",
+                view=view,
+            )
+
+        except Exception as e:
+            await _send_error(interaction, error_title="코드 제안 오류", error=e)
+
+    @bot.tree.command(name="code_merge", description="PR 자동 머지")
+    @is_cho()
+    @app_commands.describe(pr_number="머지할 PR 번호")
+    async def cmd_code_merge(interaction: discord.Interaction, pr_number: int):
+        await interaction.response.defer(thinking=True)
+        try:
+            from utils.github_client import merge_pr
+            result = await merge_pr(pr_number)
+            if result["success"]:
+                embed = embed_success(
+                    "✅ PR 머지 완료",
+                    f"PR #{pr_number} 머지됨\nRailway 자동 재배포 시작...",
+                )
+            else:
+                embed = embed_error("머지 실패", result.get("error", "알 수 없는 오류"))
+            await _send_response(interaction, embed, query=f"/code_merge {pr_number}")
+        except Exception as e:
+            await _send_error(interaction, error_title="머지 오류", error=e)
+
+    @bot.tree.command(name="code_proposals", description="최근 변경 제안 목록")
+    @is_cho()
+    async def cmd_code_proposals(interaction: discord.Interaction):
+        from modules.code_modifier import list_recent_proposals
+        proposals = list_recent_proposals(limit=15)
+
+        if not proposals:
+            embed = embed_info("📋 변경 제안", "최근 제안이 없습니다.")
+        else:
+            lines = []
+            for p in proposals:
+                status_emoji = {
+                    "pending": "⏳",
+                    "applied": "✅",
+                    "rejected": "❌",
+                    "failed": "🚨",
+                }.get(p["status"], "❓")
+                lines.append(
+                    f"{status_emoji} `{p['id']}` — `{p['path']}` "
+                    f"({p['lines_changed']}줄)\n"
+                    f"　{p['instruction'][:80]}"
+                )
+            embed = discord.Embed(
+                title="📋 최근 코드 변경 제안",
+                description="\n\n".join(lines),
+                color=0x4F46E5,
+            )
+        await _send_response(interaction, embed, query="/code_proposals", ephemeral=True)
+
+    # ───────────────────────────────────────────────────────────
     # 시스템
     # ───────────────────────────────────────────────────────────
     @bot.tree.command(name="reboot", description="봇 재부팅")
