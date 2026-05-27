@@ -100,7 +100,11 @@ async def on_ready():
             ],
         ))
     except Exception as e:
-        log.warning(f"배포 알림 실패: {e}")       
+        log.warning(f"배포 알림 실패: {e}")
+
+    # 🆕 재부팅 후 알림
+    from utils.restart_manager import send_restart_notification
+    asyncio.create_task(send_restart_notification(bot))
 
 
 async def _sync_all_guilds():

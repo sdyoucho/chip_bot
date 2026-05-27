@@ -293,14 +293,22 @@ class _AIKeysModal(discord.ui.Modal, title="AI API 키 설정"):
         style=discord.TextStyle.short,
         max_length=200,
     )
+    github_token = discord.ui.TextInput(
+        label="GitHub Personal Access Token (선택)",
+        placeholder="ghp_... 또는 github_pat_...",
+        required=False,
+        style=discord.TextStyle.short,
+        max_length=200,
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         from utils.config_manager import set_key
         updated = []
         mapping = [
-            (self.openrouter.value, "OPENROUTER_API_KEY", "OpenRouter"),
-            (self.perplexity.value, "PERPLEXITY_API_KEY", "Perplexity"),
-            (self.youtube.value,    "YOUTUBE_API_KEY",    "YouTube"),
+            (self.openrouter.value,   "OPENROUTER_API_KEY", "OpenRouter"),
+            (self.perplexity.value,   "PERPLEXITY_API_KEY", "Perplexity"),
+            (self.youtube.value,      "YOUTUBE_API_KEY",    "YouTube"),
+            (self.github_token.value, "GITHUB_TOKEN",       "GitHub"),
         ]
         for val, env_key, label in mapping:
             if val.strip():
@@ -427,6 +435,20 @@ async def setup_commands(bot: commands.Bot):
 
         start_trace()
         t_start = time.monotonic()
+
+        # 🆕 컨텍스트 수집
+        from utils.conversation_context import (
+            get_reply_context, detect_context_reference, format_context_for_prompt,
+        )
+        
+        enriched_query = query
+        if detect_context_reference(query):
+            context = await get_reply_context(interaction, max_depth=5)
+            if context:
+                context_text = format_context_for_prompt(context)
+                enriched_query = f"{query}\n\n{context_text}"
+                step("컨텍스트 수집", "ok", f"{len(context)}개 메시지")
+        
         summary_embed = None
         agent_results = {}
 
@@ -438,20 +460,28 @@ async def setup_commands(bot: commands.Bot):
 
         async def _do_work():
             nonlocal summary_embed, agent_results
-            routing = await route(query)
+
+            # 🆕 enriched_query를 router에 전달
+            routing = await route(enriched_query)
             step(
                 "Router (OpenRouter)", "ok",
                 f"agents={[m['name'] for m in routing['modules']]} "
-                f"summary={routing['needs_haecho_summary']}",
+                f"summary={routing['needs_haecho_summary']} "
+                f"urls={len(routing.get('extracted_urls', []))}",
             )
 
             agents_str = ", ".join(m['name'] for m in routing['modules'])
+            url_count = len(routing.get("extracted_urls", []))
+            status_msg = f"에이전트 호출 중: **{agents_str}**"
+            if url_count > 0:
+                status_msg += f"\n📎 URL {url_count}개 분석 중..."
+
             elapsed = int((time.monotonic() - t_start) * 1000)
             try:
                 await progress_msg.edit(
                     embed=build_progress_embed(
                         query, "수집",
-                        f"에이전트 호출 중: **{agents_str}**",
+                        status_msg,
                         elapsed_ms=elapsed,
                     ),
                     view=view,
@@ -459,7 +489,8 @@ async def setup_commands(bot: commands.Bot):
             except Exception:
                 pass
 
-            result = await orchestrate(query, routing, streamer)
+            # 🆕 enriched_query를 orchestrate에도 전달
+            result = await orchestrate(enriched_query, routing, streamer)
             agent_results = result.get("agent_results", {}) or {}
             summary_embed = result.get("summary_embed")
             return summary_embed, agent_results
@@ -1321,6 +1352,74 @@ async def setup_commands(bot: commands.Bot):
             inline=False,
         )
         embed.add_field(name="서버 수", value=f"{len(bot.guilds)}개", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ───────────────────────────────────────────────────────────
+    # 재부팅 스케줄 관리
+    # ───────────────────────────────────────────────────────────
+    @bot.tree.command(name="restart_schedule", description="자동 재부팅 시각 변경")
+    @is_cho()
+    @app_commands.describe(
+        hour="시 (0~23, 비우면 현재 설정 조회)",
+        minute="분 (0~59, 기본 0)",
+    )
+    async def cmd_restart_schedule(
+        interaction: discord.Interaction,
+        hour: int | None = None,
+        minute: int = 0,
+    ):
+        from utils.restart_manager import (
+            reschedule_auto_restart, get_restart_schedule,
+        )
+
+        # 인자 없으면 현재 설정 조회
+        if hour is None:
+            schedule = get_restart_schedule()
+            embed = discord.Embed(
+                title="⏰ 자동 재부팅 스케줄",
+                color=0x4F46E5,
+            )
+            embed.add_field(
+                name="📅 현재 설정",
+                value=f"매일 **{schedule['hour']:02d}:{schedule['minute']:02d}**",
+                inline=False,
+            )
+            if schedule["next_run"]:
+                embed.add_field(
+                    name="⏭️ 다음 실행",
+                    value=f"<t:{int(schedule['next_run'].timestamp())}:F>",
+                    inline=False,
+                )
+            embed.add_field(
+                name="🔧 스케줄러",
+                value="✅ 동작 중" if schedule["scheduler_running"] else "❌ 정지",
+                inline=False,
+            )
+            embed.set_footer(text="변경: /restart_schedule hour:N minute:N")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # 변경
+        result = reschedule_auto_restart(hour, minute)
+
+        if result["success"]:
+            embed = discord.Embed(
+                title="✅ 재부팅 스케줄 변경",
+                description=result["message"],
+                color=0x059669,
+            )
+            if result["next_run"]:
+                embed.add_field(
+                    name="⏭️ 다음 실행",
+                    value=f"<t:{int(result['next_run'].timestamp())}:F>",
+                    inline=False,
+                )
+        else:
+            embed = discord.Embed(
+                title="❌ 변경 실패",
+                description=result["message"],
+                color=0xE11D48,
+            )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ───────────────────────────────────────────────────────────
