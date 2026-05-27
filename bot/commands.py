@@ -1328,9 +1328,9 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ───────────────────────────────────────────────────────────
-    # 🛠️ 기쵸 자동 코드 수정
+    # 🛠️ 개쵸 자동 코드 수정
     # ───────────────────────────────────────────────────────────
-    @bot.tree.command(name="code_propose", description="기쵸에게 코드 수정 요청")
+    @bot.tree.command(name="code_propose", description="개쵸에게 코드 수정 요청")
     @is_cho()
     @app_commands.describe(
         path="수정할 파일 경로 (예: modules/rnd.py)",
@@ -1358,7 +1358,7 @@ async def setup_commands(bot: commands.Bot):
 
             # Embed 생성
             embed = discord.Embed(
-                title=f"🛠️ 기쵸 — 코드 변경 제안 (ID: `{proposal['id']}`)",
+                title=f"🛠️ 개쵸 — 코드 변경 제안 (ID: `{proposal['id']}`)",
                 description=(
                     f"**파일**: `{proposal['path']}`\n"
                     f"**요청**: {instruction[:300]}\n"
