@@ -48,6 +48,11 @@ SYSTEM_BOT_DESIGN = (
     "한국어로 작성하고, 실행 가능한 수준의 구체적 스펙으로 작성하세요."
 )
 
+# /code_propose 연계 안내 상수
+NEXT_STEP_HINT: str = (
+    "다음 단계: `/code_propose` 로 자동 수정 제안을 받을 수 있습니다."
+)
+
 
 # ── 1. 기본 Q&A ─────────────────────────────────────────────────────
 async def handle_query(query: str) -> discord.Embed:
@@ -125,6 +130,7 @@ async def run_health_check(bot: discord.Client) -> discord.Embed:
     )
 
     # OpenRouter 크레딧
+    credits: dict = {}
     try:
         credits = await get_remaining_credits()
         usage_ratio = credits["usage_ratio"]
@@ -151,16 +157,29 @@ async def run_health_check(bot: discord.Client) -> discord.Embed:
 
     # 데이터 디렉터리 상태
     data_dir = Path("/data") if Path("/data").exists() else Path("./data")
-    data_status = f"✅ `{data_dir}` 사용 가능" if data_dir.exists() and os.access(data_dir, os.W_OK) else f"⚠️ `{data_dir}` 쓰기 불가"
+    data_status = (
+        f"✅ `{data_dir}` 사용 가능"
+        if data_dir.exists() and os.access(data_dir, os.W_OK)
+        else f"⚠️ `{data_dir}` 쓰기 불가"
+    )
     embed.add_field(name="💾 데이터 저장소", value=data_status, inline=False)
 
     # 전반적 진단
-    has_issue = missing or (credits.get("usage_ratio", 0) >= 0.9 if 'credits' in locals() else False)
+    has_issue = bool(missing) or (credits.get("usage_ratio", 0) >= 0.9 if credits else False)
     if has_issue:
         embed.color = 0xF97316
-        embed.description = "⚠️ **주의 필요** — 아래 항목 확인"
+        embed.description = (
+            "⚠️ **주의 필요** — 아래 항목 확인\n\n" + NEXT_STEP_HINT
+        )
     else:
-        embed.description = "✅ **정상 작동 중**"
+        embed.description = "✅ **정상 작동 중**\n\n" + NEXT_STEP_HINT
+
+    # 다음 단계 안내 필드도 별도 추가 (눈에 띄게)
+    embed.add_field(
+        name="➡️ 다음 단계",
+        value=NEXT_STEP_HINT,
+        inline=False,
+    )
 
     embed.set_footer(text=f"개쵸 자가진단 · {get_start_time():%Y-%m-%d %H:%M} 시작")
     return embed
@@ -241,119 +260,4 @@ async def design_new_bot(requirements: str) -> discord.Embed:
         )
         embed.add_field(
             name="🎯 요구사항",
-            value=f"```\n{requirements[:800]}\n```",
-            inline=False,
-        )
-        embed.set_footer(
-            text=f"{result['model'].split('/')[-1]} · ${result['cost']:.5f} · "
-                 f"설계서 (실제 구현은 Phase별 별도 진행)"
-        )
-        return embed
-    except Exception as e:
-        from bot.embeds import embed_error
-        return embed_error("설계 실패", str(e))
-
-
-# ── 5. R&D 채널 공지 ───────────────────────────────────────────────
-async def post_to_rnd_channel(
-    bot: discord.Client,
-    *,
-    category: str,       # "update" | "maintenance" | "feature" | "issue"
-    title: str,
-    content: str,
-    author: str = "개쵸",
-) -> bool:
-    """
-    R&D 개발 채널에 자동 공지.
-    RND_CHANNEL_ID 환경변수 필요.
-    """
-    ch_id = os.getenv("RND_CHANNEL_ID", "").strip()
-    if not ch_id.isdigit():
-        log.info("RND_CHANNEL_ID 미설정 — R&D 채널 공지 생략")
-        return False
-
-    channel = bot.get_channel(int(ch_id))
-    if not channel:
-        log.warning(f"RND 채널 찾을 수 없음: {ch_id}")
-        return False
-
-    CATEGORY_META = {
-        "update":      ("🚀", "업데이트",       0x3B82F6),
-        "maintenance": ("🔧", "유지보수",       0x10B981),
-        "feature":     ("✨", "신규 기능",     0x8B5CF6),
-        "issue":       ("⚠️", "이슈/장애",    0xF97316),
-        "health":      ("🩺", "건강 체크",     0x06B6D4),
-        "design":      ("📐", "봇 설계서",     0xEC4899),
-    }
-    icon, label, color = CATEGORY_META.get(category, ("📝", category, 0x6B7280))
-
-    embed = discord.Embed(
-        title=f"{icon} [{label}] {title}",
-        description=content[:4000],
-        color=color,
-        timestamp=datetime.now(),
-    )
-    embed.set_footer(text=f"개쵸 R&D · {author}")
-
-    try:
-        # 포럼이면 스레드 생성, 일반 채널이면 메시지 전송
-        if isinstance(channel, discord.ForumChannel):
-            await channel.create_thread(
-                name=f"[{label}] {title}"[:100],
-                embed=embed,
-            )
-        else:
-            await channel.send(embed=embed)
-        log.info(f"R&D 채널 공지 완료: [{category}] {title}")
-        return True
-    except Exception as e:
-        log.error(f"R&D 채널 공지 실패: {e}")
-        return False
-
-
-# ── 6. 정기 건강 리포트 (매일 08:00) ─────────────────────────────
-async def daily_health_report(bot: discord.Client) -> None:
-    """매일 08시 봇 상태를 R&D 채널에 공지."""
-    try:
-        embed = await run_health_check(bot)
-        # 이미 만들어진 embed를 바로 전달
-        ch_id = os.getenv("RND_CHANNEL_ID", "").strip()
-        if not ch_id.isdigit():
-            return
-        channel = bot.get_channel(int(ch_id))
-        if not channel:
-            return
-
-        if isinstance(channel, discord.ForumChannel):
-            await channel.create_thread(
-                name=f"[일일 건강 체크] {datetime.now():%Y-%m-%d}",
-                embed=embed,
-            )
-        else:
-            await channel.send(embed=embed)
-        log.info("개쵸 일일 건강 리포트 발송")
-    except Exception as e:
-        log.error(f"일일 건강 리포트 실패: {e}")
-
-
-# ── 7. 업데이트 이벤트 훅 ───────────────────────────────────────────
-async def notify_update(
-    bot: discord.Client,
-    *,
-    version: str = "",
-    changes: list[str] = None,
-) -> None:
-    """
-    배포/업데이트 시 R&D 채널 자동 공지.
-    bot/main.py on_ready에서 호출 가능.
-    """
-    changes = changes or []
-    content = f"**버전**: {version or 'N/A'}\n\n**변경 사항**:\n"
-    content += "\n".join(f"• {c}" for c in changes) if changes else "(상세 내역 없음)"
-
-    await post_to_rnd_channel(
-        bot,
-        category="update",
-        title=f"봇 재배포 완료 {version}".strip(),
-        content=content,
-    )
+            value=f"
