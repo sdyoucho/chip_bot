@@ -1515,6 +1515,107 @@ async def setup_commands(bot: commands.Bot):
             )
         await _send_response(interaction, embed, query="/code_sessions", ephemeral=True)
 
+    @bot.tree.command(name="code_diagnose", description="GitHub 연동 상태 진단")
+    @is_cho()
+    async def cmd_code_diagnose(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            from utils.github_client import diagnose_github_access, _get_repo_info
+
+            diag = await diagnose_github_access()
+            info = _get_repo_info()
+
+            # 상태 결정
+            critical_issues = [i for i in diag["issues"] if i.startswith("❌")]
+            if critical_issues:
+                color = 0xE11D48
+                status = "❌ 문제 있음"
+            elif diag["issues"]:
+                color = 0xEAB308
+                status = "⚠️ 경고"
+            else:
+                color = 0x059669
+                status = "✅ 정상"
+
+            embed = discord.Embed(
+                title=f"🔍 GitHub 연동 진단 — {status}",
+                color=color,
+            )
+
+            # 1) 토큰 상태
+            token_lines = [
+                f"**설정됨**: {'✅' if diag['token_set'] else '❌'}",
+                f"**유효함**: {'✅' if diag['token_valid'] else '❌'}",
+            ]
+            if diag["token_set"]:
+                token_lines.append(f"**Preview**: `{diag['token_preview']}`")
+            if diag["user_login"]:
+                token_lines.append(f"**사용자**: `{diag['user_login']}`")
+            if diag["scopes"]:
+                token_lines.append(f"**스코프**: `{', '.join(diag['scopes'])}`")
+
+            embed.add_field(
+                name="🔑 토큰 상태",
+                value="\n".join(token_lines),
+                inline=False,
+            )
+
+            # 2) 레포 상태
+            repo_lines = [
+                f"**경로**: `{info['owner']}/{info['repo']}`",
+                f"**브랜치**: `{info['branch']}`",
+                f"**접근 가능**: {'✅' if diag['repo_accessible'] else '❌'}",
+            ]
+            if diag["repo_full_name"]:
+                repo_lines.append(f"**확인된 이름**: `{diag['repo_full_name']}`")
+            perms = diag.get("repo_permissions", {})
+            if perms:
+                perm_emoji = lambda v: "✅" if v else "❌"
+                repo_lines.append(
+                    f"**권한**: "
+                    f"pull {perm_emoji(perms.get('pull'))} | "
+                    f"push {perm_emoji(perms.get('push'))} | "
+                    f"admin {perm_emoji(perms.get('admin'))}"
+                )
+
+            embed.add_field(
+                name="📦 레포 상태",
+                value="\n".join(repo_lines),
+                inline=False,
+            )
+
+            # 3) Rate limit
+            embed.add_field(
+                name="⏱️ Rate Limit",
+                value=(
+                    f"잔여: **{diag['rate_limit_remaining']}** / "
+                    f"{diag['rate_limit_max']}"
+                ),
+                inline=True,
+            )
+
+            # 4) 문제점
+            if diag["issues"]:
+                embed.add_field(
+                    name=f"🚨 발견된 문제 ({len(diag['issues'])}개)",
+                    value="\n".join(diag["issues"])[:1024],
+                    inline=False,
+                )
+
+            # 5) 권장 조치
+            if diag["recommendations"]:
+                embed.add_field(
+                    name="💡 권장 조치",
+                    value="\n".join(f"• {r}" for r in diag["recommendations"])[:1024],
+                    inline=False,
+                )
+
+            embed.set_footer(text="문제 해결 후 /code_propose 재시도")
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await _send_error(interaction, error_title="진단 오류", error=e)
+
     # ───────────────────────────────────────────────────────────
     # 시스템
     # ───────────────────────────────────────────────────────────

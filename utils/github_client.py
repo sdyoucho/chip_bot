@@ -32,6 +32,7 @@ def _get_repo_info() -> dict:
 
 
 def _headers() -> dict:
+    """GitHub API 헤더 (PAT 있으면 인증 추가)."""
     token = _get_token()
     h = {
         "Accept": "application/vnd.github.v3+json",
@@ -39,6 +40,11 @@ def _headers() -> dict:
     }
     if token:
         h["Authorization"] = f"Bearer {token}"
+        log.debug(f"GitHub API 호출 (인증됨: {token[:10]}...)")
+    else:
+        log.warning(
+            "⚠️ GITHUB_TOKEN 미설정 — 익명 호출 (60 req/h, 쓰기 작업 불가)"
+        )
     return h
 
 
@@ -252,3 +258,162 @@ def generate_branch_name(prefix: str = "gicho/auto") -> str:
     """자동 브랜치 이름 생성."""
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"{prefix}-{timestamp}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 진단 함수 (디버깅용)
+# ═══════════════════════════════════════════════════════════════════
+
+async def diagnose_github_access() -> dict:
+    """
+    GitHub 인증 상태를 종합 진단.
+
+    Returns:
+        {
+            "token_set": bool,
+            "token_preview": str,         # 처음 10자만
+            "token_valid": bool,
+            "user_login": str,
+            "rate_limit_remaining": int,
+            "rate_limit_max": int,
+            "repo_accessible": bool,
+            "repo_full_name": str,
+            "repo_permissions": dict,     # admin/push/pull
+            "scopes": list[str],          # 토큰 권한 범위
+            "issues": list[str],          # 발견된 문제
+            "recommendations": list[str], # 권장사항
+        }
+    """
+    result = {
+        "token_set": False,
+        "token_preview": "",
+        "token_valid": False,
+        "user_login": "",
+        "rate_limit_remaining": 0,
+        "rate_limit_max": 0,
+        "repo_accessible": False,
+        "repo_full_name": "",
+        "repo_permissions": {},
+        "scopes": [],
+        "issues": [],
+        "recommendations": [],
+    }
+
+    # 1) 토큰 존재 확인
+    token = _get_token()
+    if not token:
+        result["issues"].append("❌ GITHUB_TOKEN 환경변수가 비어있음")
+        result["recommendations"].append(
+            "Discord에서 `/config_ai` 실행 → GitHub PAT 입력"
+        )
+        return result
+
+    result["token_set"] = True
+    result["token_preview"] = token[:10] + "..." if len(token) > 10 else token
+
+    # 토큰 형식 검증
+    if not (token.startswith("ghp_") or token.startswith("github_pat_")):
+        result["issues"].append(
+            f"⚠️ 토큰 형식이 비표준 (시작: {token[:10]})"
+        )
+
+    # 2) 토큰 유효성 확인 — /user 엔드포인트
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_headers()) as session:
+            # /user 호출 (인증 필수)
+            async with session.get(f"{GITHUB_API}/user") as resp:
+                if resp.status == 401:
+                    result["issues"].append("❌ 토큰이 유효하지 않음 (401 Unauthorized)")
+                    result["recommendations"].append(
+                        "GitHub Settings → Developer settings → "
+                        "Personal access tokens에서 새 토큰 발급"
+                    )
+                    # rate limit은 익명으로도 확인 가능하니 계속 진행
+                elif resp.status == 200:
+                    user_data = await resp.json()
+                    result["token_valid"] = True
+                    result["user_login"] = user_data.get("login", "unknown")
+
+                    # 토큰 스코프 추출
+                    scopes_header = resp.headers.get("X-OAuth-Scopes", "")
+                    if scopes_header:
+                        result["scopes"] = [s.strip() for s in scopes_header.split(",") if s.strip()]
+
+            # 3) Rate limit 확인
+            async with session.get(f"{GITHUB_API}/rate_limit") as resp:
+                if resp.status == 200:
+                    rate_data = await resp.json()
+                    core = rate_data.get("resources", {}).get("core", {})
+                    result["rate_limit_remaining"] = core.get("remaining", 0)
+                    result["rate_limit_max"] = core.get("limit", 60)
+
+            # 4) 레포 접근 확인
+            info = _get_repo_info()
+            repo_url = f"{GITHUB_API}/repos/{info['owner']}/{info['repo']}"
+            async with session.get(repo_url) as resp:
+                if resp.status == 200:
+                    repo_data = await resp.json()
+                    result["repo_accessible"] = True
+                    result["repo_full_name"] = repo_data.get("full_name", "")
+                    result["repo_permissions"] = repo_data.get("permissions", {})
+                elif resp.status == 404:
+                    result["issues"].append(
+                        f"❌ 레포 접근 불가: {info['owner']}/{info['repo']} "
+                        "(존재하지 않거나 비공개 + 권한 없음)"
+                    )
+                    result["recommendations"].append(
+                        "환경변수 GITHUB_REPO_OWNER, GITHUB_REPO_NAME 확인"
+                    )
+                elif resp.status == 401:
+                    result["issues"].append("❌ 레포 접근 인증 실패")
+    except asyncio.TimeoutError:
+        result["issues"].append("❌ GitHub API 타임아웃 (네트워크 문제)")
+    except Exception as e:
+        result["issues"].append(f"❌ 예외: {e}")
+
+    # 5) 권한 분석
+    if result["token_valid"]:
+        # 필요 스코프: 'repo' (private) 또는 'public_repo' (public only)
+        needed = {"repo", "public_repo"}
+        has_any = bool(set(result["scopes"]) & needed)
+
+        if not result["scopes"]:
+            result["issues"].append(
+                "⚠️ 토큰 스코프를 확인할 수 없음 (Fine-grained PAT일 수 있음)"
+            )
+        elif not has_any:
+            result["issues"].append(
+                f"❌ 'repo' 또는 'public_repo' 스코프 없음 "
+                f"(현재: {result['scopes']})"
+            )
+            result["recommendations"].append(
+                "새 토큰 발급 시 'repo' 스코프 체크 필수"
+            )
+
+        # 레포 권한 확인
+        perms = result["repo_permissions"]
+        if perms and not perms.get("push", False):
+            result["issues"].append(
+                "❌ 레포에 push 권한 없음 (브랜치 생성 불가)"
+            )
+            result["recommendations"].append(
+                "본인이 소유한 레포의 토큰을 사용하거나, "
+                "Collaborator 권한 추가"
+            )
+
+    # Rate limit 경고
+    if result["rate_limit_remaining"] < 10 and result["rate_limit_max"] > 60:
+        result["issues"].append(
+            f"⚠️ Rate limit 거의 소진 ({result['rate_limit_remaining']}/{result['rate_limit_max']})"
+        )
+    elif result["rate_limit_max"] == 60:
+        result["issues"].append(
+            "⚠️ Rate limit이 60 (익명 수준) — 토큰이 헤더에 실리지 않은 듯"
+        )
+
+    return result
+
+
+# asyncio import 추가 (파일 상단에 이미 없다면)
+import asyncio
