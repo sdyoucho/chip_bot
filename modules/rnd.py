@@ -20,7 +20,6 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import discord
 
@@ -78,27 +77,6 @@ async def handle_query(query: str) -> discord.Embed:
 
 
 # ── 2. 봇 건강 상태 체크 ───────────────────────────────────────────
-def _check_result(name: str, ok: bool, detail: str) -> dict[str, Any]:
-    """표준 체크 항목 결과 dict 생성."""
-    return {"name": name, "ok": bool(ok), "detail": str(detail)}
-
-
-async def _safe_check(name: str, coro_or_func, *args, **kwargs) -> dict[str, Any]:
-    """
-    개별 체크를 안전하게 실행.
-    예외 발생 시에도 표준 결과를 반환하여 전체 리포트가 깨지지 않도록 함.
-    """
-    try:
-        if asyncio.iscoroutinefunction(coro_or_func):
-            value = await coro_or_func(*args, **kwargs)
-        else:
-            value = coro_or_func(*args, **kwargs)
-        return _check_result(name, True, str(value) if value is not None else "OK")
-    except Exception as e:
-        log.exception(f"[health] {name} 체크 실패: {e}")
-        return _check_result(name, False, f"{type(e).__name__}: {e}")
-
-
 async def run_health_check(bot: discord.Client) -> discord.Embed:
     """
     봇의 현재 상태를 진단.
@@ -106,150 +84,85 @@ async def run_health_check(bot: discord.Client) -> discord.Embed:
     - 연결된 서버 수
     - OpenRouter 크레딧
     - 필수 환경변수
-    - 데이터 디렉터리 상태
-
-    개별 체크 실패 시에도 전체 리포트는 정상적으로 반환된다.
+    - 최근 로그 에러 횟수 (가능하면)
     """
+    from utils.restart_manager import get_uptime, get_start_time
+    from utils.openrouter_client import get_remaining_credits
+
     embed = discord.Embed(
         title="🩺 개쵸 — 봇 건강 진단",
         color=0x06B6D4,
         timestamp=datetime.now(),
     )
 
-    checks: list[dict[str, Any]] = []  # 표준 결과 누적용 (요약 판정에 사용)
+    # 기본 정보
+    embed.add_field(
+        name="⏱️ 가동 시간",
+        value=get_uptime(),
+        inline=True,
+    )
+    embed.add_field(
+        name="🌐 연결 서버",
+        value=f"{len(bot.guilds)}개",
+        inline=True,
+    )
+    embed.add_field(
+        name="📡 지연 시간",
+        value=f"{bot.latency * 1000:.0f}ms",
+        inline=True,
+    )
 
-    # ── 가동 시간 / 시작 시각 ──────────────────────────────────
-    uptime_str = "N/A"
-    start_time_str = "N/A"
+    # 시스템 정보
+    embed.add_field(
+        name="💻 Python",
+        value=platform.python_version(),
+        inline=True,
+    )
+    embed.add_field(
+        name="🖥️ 플랫폼",
+        value=platform.system(),
+        inline=True,
+    )
+
+    # OpenRouter 크레딧
     try:
-        from utils.restart_manager import get_uptime, get_start_time
-        try:
-            uptime_str = get_uptime() or "N/A"
-            checks.append(_check_result("uptime", True, uptime_str))
-        except Exception as e:
-            log.exception(f"[health] uptime 조회 실패: {e}")
-            checks.append(_check_result("uptime", False, str(e)))
-
-        try:
-            st = get_start_time()
-            if st is not None:
-                start_time_str = f"{st:%Y-%m-%d %H:%M}"
-        except Exception as e:
-            log.exception(f"[health] start_time 조회 실패: {e}")
-    except Exception as e:
-        log.exception(f"[health] restart_manager import 실패: {e}")
-        checks.append(_check_result("uptime", False, f"import 실패: {e}"))
-
-    embed.add_field(name="⏱️ 가동 시간", value=uptime_str, inline=True)
-
-    # ── 연결된 서버 ────────────────────────────────────────────
-    try:
-        guild_count = len(bot.guilds) if bot and getattr(bot, "guilds", None) is not None else 0
-        embed.add_field(name="🌐 연결 서버", value=f"{guild_count}개", inline=True)
-        checks.append(_check_result("guilds", True, f"{guild_count}개"))
-    except Exception as e:
-        log.exception(f"[health] 서버 수 조회 실패: {e}")
-        embed.add_field(name="🌐 연결 서버", value="❌ 오류", inline=True)
-        checks.append(_check_result("guilds", False, str(e)))
-
-    # ── 지연 시간 ───────────────────────────────────────────────
-    try:
-        latency = getattr(bot, "latency", None)
-        if latency is None or latency != latency:  # NaN 체크
-            raise ValueError("latency 미정의")
-        embed.add_field(name="📡 지연 시간", value=f"{latency * 1000:.0f}ms", inline=True)
-        checks.append(_check_result("latency", True, f"{latency * 1000:.0f}ms"))
-    except Exception as e:
-        log.warning(f"[health] latency 조회 실패: {e}")
-        embed.add_field(name="📡 지연 시간", value="N/A", inline=True)
-        checks.append(_check_result("latency", False, str(e)))
-
-    # ── 시스템 정보 ────────────────────────────────────────────
-    try:
-        embed.add_field(name="💻 Python", value=platform.python_version(), inline=True)
-        embed.add_field(name="🖥️ 플랫폼", value=platform.system(), inline=True)
-    except Exception as e:
-        log.warning(f"[health] platform 정보 조회 실패: {e}")
-
-    # ── OpenRouter 크레딧 ──────────────────────────────────────
-    credits: dict[str, Any] = {}
-    try:
-        from utils.openrouter_client import get_remaining_credits
-        credits = await get_remaining_credits() or {}
-        usage_ratio = float(credits.get("usage_ratio", 0) or 0)
-        remaining = float(credits.get("remaining", 0) or 0)
+        credits = await get_remaining_credits()
+        usage_ratio = credits["usage_ratio"]
         credit_icon = "🟢" if usage_ratio < 0.5 else "🟠" if usage_ratio < 0.9 else "🔴"
         embed.add_field(
             name="💰 OpenRouter",
             value=(
-                f"{credit_icon} 사용 {usage_ratio * 100:.1f}%\n"
-                f"잔여 ${remaining:.3f}"
+                f"{credit_icon} 사용 {usage_ratio*100:.1f}%\n"
+                f"잔여 ${credits['remaining']:.3f}"
             ),
             inline=True,
         )
-        checks.append(_check_result(
-            "openrouter",
-            usage_ratio < 0.9,
-            f"usage {usage_ratio*100:.1f}% / remaining ${remaining:.3f}",
-        ))
     except Exception as e:
-        log.exception(f"[health] OpenRouter 크레딧 조회 실패: {e}")
-        embed.add_field(name="💰 OpenRouter", value=f"❌ {type(e).__name__}", inline=True)
-        checks.append(_check_result("openrouter", False, str(e)))
+        embed.add_field(name="💰 OpenRouter", value=f"❌ {e}", inline=True)
 
-    # ── 필수 환경변수 체크 ─────────────────────────────────────
-    missing: list[str] = []
-    try:
-        required_vars = [
-            "DISCORD_TOKEN", "OPENROUTER_API_KEY", "CHO_USER_ID",
-            "NOTION_TOKEN", "NOTION_STREAMERS_DB",
-        ]
-        missing = [v for v in required_vars if not os.getenv(v, "").strip()]
-        env_status = "✅ 모두 설정됨" if not missing else f"❌ 누락: {', '.join(missing)}"
-        embed.add_field(name="🔑 환경변수", value=env_status, inline=False)
-        checks.append(_check_result(
-            "env_vars",
-            not missing,
-            "OK" if not missing else f"missing: {', '.join(missing)}",
-        ))
-    except Exception as e:
-        log.exception(f"[health] 환경변수 체크 실패: {e}")
-        embed.add_field(name="🔑 환경변수", value=f"❌ {e}", inline=False)
-        checks.append(_check_result("env_vars", False, str(e)))
+    # 필수 환경변수 체크
+    required_vars = [
+        "DISCORD_TOKEN", "OPENROUTER_API_KEY", "CHO_USER_ID",
+        "NOTION_TOKEN", "NOTION_STREAMERS_DB",
+    ]
+    missing = [v for v in required_vars if not os.getenv(v, "").strip()]
+    env_status = "✅ 모두 설정됨" if not missing else f"❌ 누락: {', '.join(missing)}"
+    embed.add_field(name="🔑 환경변수", value=env_status, inline=False)
 
-    # ── 데이터 디렉터리 상태 ──────────────────────────────────
-    try:
-        data_dir = Path("/data") if Path("/data").exists() else Path("./data")
-        writable = data_dir.exists() and os.access(data_dir, os.W_OK)
-        data_status = (
-            f"✅ `{data_dir}` 사용 가능"
-            if writable
-            else f"⚠️ `{data_dir}` 쓰기 불가"
-        )
-        embed.add_field(name="💾 데이터 저장소", value=data_status, inline=False)
-        checks.append(_check_result("data_dir", writable, str(data_dir)))
-    except Exception as e:
-        log.exception(f"[health] 데이터 디렉터리 체크 실패: {e}")
-        embed.add_field(name="💾 데이터 저장소", value=f"❌ {e}", inline=False)
-        checks.append(_check_result("data_dir", False, str(e)))
+    # 데이터 디렉터리 상태
+    data_dir = Path("/data") if Path("/data").exists() else Path("./data")
+    data_status = f"✅ `{data_dir}` 사용 가능" if data_dir.exists() and os.access(data_dir, os.W_OK) else f"⚠️ `{data_dir}` 쓰기 불가"
+    embed.add_field(name="💾 데이터 저장소", value=data_status, inline=False)
 
-    # ── 전반적 진단 ────────────────────────────────────────────
-    try:
-        usage_ratio = float(credits.get("usage_ratio", 0) or 0) if credits else 0.0
-        has_issue = bool(missing) or (usage_ratio >= 0.9) or any(not c["ok"] for c in checks)
-        if has_issue:
-            embed.color = 0xF97316
-            failed = [c["name"] for c in checks if not c["ok"]]
-            extra = f" (실패: {', '.join(failed)})" if failed else ""
-            embed.description = f"⚠️ **주의 필요** — 아래 항목 확인{extra}"
-        else:
-            embed.description = "✅ **정상 작동 중**"
-    except Exception as e:
-        log.exception(f"[health] 종합 진단 실패: {e}")
-        embed.description = "⚠️ 진단 중 일부 오류 발생"
+    # 전반적 진단
+    has_issue = missing or (credits.get("usage_ratio", 0) >= 0.9 if 'credits' in locals() else False)
+    if has_issue:
+        embed.color = 0xF97316
+        embed.description = "⚠️ **주의 필요** — 아래 항목 확인"
+    else:
+        embed.description = "✅ **정상 작동 중**"
 
-    embed.set_footer(text=f"개쵸 자가진단 · {start_time_str} 시작")
-    log.info(f"[health] 체크 완료 — {sum(1 for c in checks if c['ok'])}/{len(checks)} 정상")
+    embed.set_footer(text=f"개쵸 자가진단 · {get_start_time():%Y-%m-%d %H:%M} 시작")
     return embed
 
 
@@ -328,4 +241,119 @@ async def design_new_bot(requirements: str) -> discord.Embed:
         )
         embed.add_field(
             name="🎯 요구사항",
-            value=f"
+            value=f"```\n{requirements[:800]}\n```",
+            inline=False,
+        )
+        embed.set_footer(
+            text=f"{result['model'].split('/')[-1]} · ${result['cost']:.5f} · "
+                 f"설계서 (실제 구현은 Phase별 별도 진행)"
+        )
+        return embed
+    except Exception as e:
+        from bot.embeds import embed_error
+        return embed_error("설계 실패", str(e))
+
+
+# ── 5. R&D 채널 공지 ───────────────────────────────────────────────
+async def post_to_rnd_channel(
+    bot: discord.Client,
+    *,
+    category: str,       # "update" | "maintenance" | "feature" | "issue"
+    title: str,
+    content: str,
+    author: str = "개쵸",
+) -> bool:
+    """
+    R&D 개발 채널에 자동 공지.
+    RND_CHANNEL_ID 환경변수 필요.
+    """
+    ch_id = os.getenv("RND_CHANNEL_ID", "").strip()
+    if not ch_id.isdigit():
+        log.info("RND_CHANNEL_ID 미설정 — R&D 채널 공지 생략")
+        return False
+
+    channel = bot.get_channel(int(ch_id))
+    if not channel:
+        log.warning(f"RND 채널 찾을 수 없음: {ch_id}")
+        return False
+
+    CATEGORY_META = {
+        "update":      ("🚀", "업데이트",       0x3B82F6),
+        "maintenance": ("🔧", "유지보수",       0x10B981),
+        "feature":     ("✨", "신규 기능",     0x8B5CF6),
+        "issue":       ("⚠️", "이슈/장애",    0xF97316),
+        "health":      ("🩺", "건강 체크",     0x06B6D4),
+        "design":      ("📐", "봇 설계서",     0xEC4899),
+    }
+    icon, label, color = CATEGORY_META.get(category, ("📝", category, 0x6B7280))
+
+    embed = discord.Embed(
+        title=f"{icon} [{label}] {title}",
+        description=content[:4000],
+        color=color,
+        timestamp=datetime.now(),
+    )
+    embed.set_footer(text=f"개쵸 R&D · {author}")
+
+    try:
+        # 포럼이면 스레드 생성, 일반 채널이면 메시지 전송
+        if isinstance(channel, discord.ForumChannel):
+            await channel.create_thread(
+                name=f"[{label}] {title}"[:100],
+                embed=embed,
+            )
+        else:
+            await channel.send(embed=embed)
+        log.info(f"R&D 채널 공지 완료: [{category}] {title}")
+        return True
+    except Exception as e:
+        log.error(f"R&D 채널 공지 실패: {e}")
+        return False
+
+
+# ── 6. 정기 건강 리포트 (매일 08:00) ─────────────────────────────
+async def daily_health_report(bot: discord.Client) -> None:
+    """매일 08시 봇 상태를 R&D 채널에 공지."""
+    try:
+        embed = await run_health_check(bot)
+        # 이미 만들어진 embed를 바로 전달
+        ch_id = os.getenv("RND_CHANNEL_ID", "").strip()
+        if not ch_id.isdigit():
+            return
+        channel = bot.get_channel(int(ch_id))
+        if not channel:
+            return
+
+        if isinstance(channel, discord.ForumChannel):
+            await channel.create_thread(
+                name=f"[일일 건강 체크] {datetime.now():%Y-%m-%d}",
+                embed=embed,
+            )
+        else:
+            await channel.send(embed=embed)
+        log.info("개쵸 일일 건강 리포트 발송")
+    except Exception as e:
+        log.error(f"일일 건강 리포트 실패: {e}")
+
+
+# ── 7. 업데이트 이벤트 훅 ───────────────────────────────────────────
+async def notify_update(
+    bot: discord.Client,
+    *,
+    version: str = "",
+    changes: list[str] = None,
+) -> None:
+    """
+    배포/업데이트 시 R&D 채널 자동 공지.
+    bot/main.py on_ready에서 호출 가능.
+    """
+    changes = changes or []
+    content = f"**버전**: {version or 'N/A'}\n\n**변경 사항**:\n"
+    content += "\n".join(f"• {c}" for c in changes) if changes else "(상세 내역 없음)"
+
+    await post_to_rnd_channel(
+        bot,
+        category="update",
+        title=f"봇 재배포 완료 {version}".strip(),
+        content=content,
+    )
