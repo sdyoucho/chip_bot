@@ -1543,6 +1543,184 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ───────────────────────────────────────────────────────────
+    # 📚 기쵸 러닝 시스템
+    # ───────────────────────────────────────────────────────────
+    @bot.tree.command(name="gicho_learn_add", description="기쵸 학습 항목 등록")
+    @is_cho()
+    @app_commands.describe(
+        subject="학습 주제",
+        sources="소스 URL들 (쉼표로 구분)",
+        category="카테고리",
+        auto_approve="등록 즉시 자동 학습 시작 (기본 False)",
+    )
+    @app_commands.choices(category=[
+        app_commands.Choice(name=cat, value=cat)
+        for cat in ["콘텐츠_트렌드", "기획_기법", "협업_사례",
+                    "썸네일_분석", "제목_분석", "스트리밍_기술",
+                    "스폰서십", "기타"]
+    ])
+    async def cmd_gicho_learn_add(
+        interaction: discord.Interaction,
+        subject: str,
+        sources: str,
+        category: str = "기타",
+        auto_approve: bool = False,
+    ):
+        await interaction.response.defer(thinking=True)
+        try:
+            from modules.gicho_learning import create_learning_item, execute_learning
+
+            urls = [u.strip() for u in sources.split(",") if u.strip()]
+            if not urls:
+                await _send_error(interaction, error_title="등록 실패", error="유효한 URL이 없음")
+                return
+
+            item = create_learning_item(
+                subject=subject,
+                category=category,
+                sources=urls,
+                requested_by=interaction.user.name,
+                auto_approve=auto_approve,
+            )
+
+            status_text = "자동 학습 시작" if auto_approve else "승인 대기"
+            embed = discord.Embed(
+                title=f"📚 학습 항목 등록 (`{item['id']}`)",
+                description=(
+                    f"**주제**: {subject}\n"
+                    f"**카테고리**: {category}\n"
+                    f"**소스**: {len(urls)}개\n"
+                    f"**상태**: {status_text}\n\n"
+                    + ("\n".join(f"• {u}" for u in urls[:5]))
+                ),
+                color=0xD97706,
+            )
+
+            if auto_approve:
+                # 백그라운드에서 학습 실행
+                asyncio.create_task(execute_learning(item["id"]))
+
+            await _send_response(interaction, embed, query=f"/gicho_learn_add {subject}")
+        except Exception as e:
+            await _send_error(interaction, error_title="학습 등록 오류", error=e)
+
+    @bot.tree.command(name="gicho_learn_approve", description="학습 승인 + 실행")
+    @is_cho()
+    @app_commands.describe(item_id="학습 항목 ID (8자리)")
+    async def cmd_gicho_learn_approve(interaction: discord.Interaction, item_id: str):
+        await interaction.response.defer(thinking=True)
+        try:
+            from modules.gicho_learning import approve_item, execute_learning
+
+            if not approve_item(item_id):
+                await _send_error(
+                    interaction, error_title="승인 실패",
+                    error="ID를 찾을 수 없거나 이미 처리됨",
+                )
+                return
+
+            # 백그라운드 학습 실행
+            asyncio.create_task(execute_learning(item_id))
+
+            embed = embed_success(
+                "✅ 학습 승인됨",
+                f"항목 `{item_id}` 학습이 백그라운드에서 시작됩니다.\n"
+                "완료 후 `/gicho_learn_status`로 결과 확인 가능.",
+            )
+            await _send_response(interaction, embed, query=f"/gicho_learn_approve {item_id}")
+        except Exception as e:
+            await _send_error(interaction, error_title="승인 오류", error=e)
+
+    @bot.tree.command(name="gicho_learn_status", description="학습 항목 조회")
+    @is_cho()
+    @app_commands.describe(item_id="(선택) 특정 ID 조회. 비우면 전체 목록")
+    async def cmd_gicho_learn_status(
+        interaction: discord.Interaction,
+        item_id: Optional[str] = None,
+    ):
+        await interaction.response.defer(thinking=True)
+        try:
+            from modules.gicho_learning import get_item, list_items, get_stats
+
+            if item_id:
+                # 단일 항목 상세
+                item = get_item(item_id)
+                if not item:
+                    await _send_error(
+                        interaction, error_title="조회 실패",
+                        error="ID를 찾을 수 없음",
+                    )
+                    return
+
+                insights = json.loads(item.get("insights") or "[]")
+                applications = json.loads(item.get("applications") or "[]")
+
+                embed = discord.Embed(
+                    title=f"📚 학습 항목 `{item['id']}`",
+                    description=(
+                        f"**주제**: {item['subject']}\n"
+                        f"**카테고리**: {item['category']}\n"
+                        f"**상태**: {item['status']}\n"
+                        f"**비용**: ${item.get('cost_usd', 0):.4f}\n\n"
+                        f"### 요약\n{item.get('summary') or '(미완료)'}"
+                    ),
+                    color=0xD97706,
+                )
+
+                if insights:
+                    embed.add_field(
+                        name="💡 핵심 인사이트",
+                        value="\n".join(f"• {i[:200]}" for i in insights[:7])[:1024],
+                        inline=False,
+                    )
+                if applications:
+                    embed.add_field(
+                        name="🎯 활용 방안",
+                        value="\n".join(f"• {a[:200]}" for a in applications[:5])[:1024],
+                        inline=False,
+                    )
+            else:
+                # 전체 통계 + 최근 목록
+                stats = get_stats()
+                items = list_items(limit=10)
+
+                embed = discord.Embed(
+                    title="📚 기쵸 러닝 시스템",
+                    description=(
+                        f"**총 학습**: {stats['total']}개\n"
+                        f"**총 비용**: ${stats['total_cost_usd']:.4f}\n\n"
+                        f"**상태별**: "
+                        + " · ".join(f"{k}: {v}" for k, v in stats["by_status"].items())
+                    ),
+                    color=0xD97706,
+                )
+
+                if items:
+                    lines = []
+                    for item in items:
+                        emoji = {
+                            "requested": "⏳",
+                            "approved": "🟡",
+                            "learning": "🔄",
+                            "completed": "✅",
+                            "rejected": "❌",
+                            "failed": "🚨",
+                        }.get(item["status"], "❓")
+                        lines.append(
+                            f"{emoji} `{item['id']}` — {item['subject'][:60]} "
+                            f"[{item['category']}]"
+                        )
+                    embed.add_field(
+                        name="📋 최근 항목",
+                        value="\n".join(lines)[:1024],
+                        inline=False,
+                    )
+
+            await _send_response(interaction, embed, query="/gicho_learn_status")
+        except Exception as e:
+            await _send_error(interaction, error_title="조회 오류", error=e)
+
+    # ───────────────────────────────────────────────────────────
     # /help — 페이지네이션
     # ───────────────────────────────────────────────────────────
     @bot.tree.command(name="help", description="명령어 도움말 (페이지별)")
