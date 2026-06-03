@@ -1329,6 +1329,48 @@ async def setup_commands(bot: commands.Bot):
             embed = discord.Embed(title="🎯 포럼 해제", color=0x94A3B8)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @bot.tree.command(name="rnd_forum_channel", description="개쵸 코드 변경 포럼 채널 설정")
+    @is_cho()
+    @app_commands.describe(channel="포럼 채널 (비우면 해제)")
+    async def cmd_rnd_forum_channel(
+        interaction: discord.Interaction,
+        channel: discord.ForumChannel | None = None,
+    ):
+        from utils.config_manager import set_key
+
+        if channel:
+            perms = channel.permissions_for(interaction.guild.me) if interaction.guild else None
+            if perms and not (perms.send_messages and perms.create_public_threads):
+                await interaction.response.send_message(
+                    embed=embed_error(
+                        "권한 부족",
+                        "스레드 생성 권한 필요 (Create Public Threads)",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            set_key("RND_FORUM_CHANNEL_ID", str(channel.id))
+            embed = discord.Embed(
+                title="🔧 개쵸 R&D 포럼 설정 완료",
+                description=(
+                    f"채널: {channel.mention}\n\n"
+                    "**자동 게시 항목**:\n"
+                    "• `/code_propose` → PR 생성 시 변경 내역 자동 스레드\n"
+                    "• 각 파일별 diff + 변경 요약\n"
+                    "• PR 링크 + 머지 명령 안내\n\n"
+                    "**테스트**: `/code_propose docstring 추가` 같은 작은 변경으로 확인"
+                ),
+                color=0x06B6D4,
+            )
+        else:
+            set_key("RND_FORUM_CHANNEL_ID", "")
+            embed = discord.Embed(
+                title="🔧 R&D 포럼 해제",
+                color=0x94A3B8,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # ───────────────────────────────────────────────────────────
     # 🤖 개쵸 — 자동 코드 변경 (자연어 요청 → 자동 분석)
     # ───────────────────────────────────────────────────────────
@@ -1428,6 +1470,7 @@ async def setup_commands(bot: commands.Bot):
             view = PlanApprovalView(
                 session_id=session["id"],
                 owner_id=interaction.user.id,
+                message=progress_msg,   # 🆕 메시지 참조 전달
                 timeout=600,
             )
 
