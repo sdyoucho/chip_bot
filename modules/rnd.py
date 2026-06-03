@@ -5,7 +5,7 @@ modules/rnd.py
 역할:
 1. Q&A: 기술 질문 응답 (기존 기능)
 2. 자가 진단: 봇 건강 상태 체크 (/rnd_health)
-3. 코드 리뷰: 로그·오류 분석 (/rnd_diagnose)
+3. 코드 리뷰: 봇 소스 분석·개선 제안 (/rnd_diagnose)
 4. 업데이트 공지: R&D 채널에 업데이트 현황 자동 게시
 5. 신규 봇 설계: Claude Opus로 신규 봇 스펙 초안 생성
 
@@ -20,7 +20,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import discord
 
@@ -48,6 +48,25 @@ SYSTEM_BOT_DESIGN = (
     "## 예상 월 비용\n## 개발 우선순위 (Phase 1~3)\n"
     "한국어로 작성하고, 실행 가능한 수준의 구체적 스펙으로 작성하세요."
 )
+
+SYSTEM_CODE_REVIEW = (
+    "당신은 '개쵸'입니다. Python/Discord.py 시니어 코드 리뷰어로서, "
+    "주어진 봇 소스 코드를 분석해 다음을 한국어 마크다운으로 작성합니다:\n"
+    "## 🔍 코드 리뷰 요약\n"
+    "## 🐞 잠재 버그\n"
+    "## 🛠️ 리팩토링 포인트\n"
+    "## 💡 개선 제안 (3~5개)\n"
+    "## ✅ 우선순위 액션 아이템\n"
+    "각 항목은 구체적인 파일명·함수명을 명시하고, 가능하면 짧은 코드 예시를 포함하세요."
+)
+
+# 기본 리뷰 대상 파일 (GitHub 경로 기준)
+DEFAULT_REVIEW_TARGETS = [
+    "bot/commands.py",
+    "bot/router.py",
+    "modules/rnd.py",
+    "modules/haecho.py",
+]
 
 
 # ── 1. 기본 Q&A ─────────────────────────────────────────────────────
@@ -253,79 +272,54 @@ async def run_health_check(bot: discord.Client) -> discord.Embed:
     return embed
 
 
-# ── 3. 로그/이슈 진단 ──────────────────────────────────────────────
-async def diagnose_issue(issue_description: str) -> discord.Embed:
+# ── 3. 코드베이스 리뷰 기반 진단 ───────────────────────────────────
+async def diagnose_codebase(target_files: Optional[list[str]] = None) -> str:
     """
-    사용자가 설명한 이슈를 Claude Opus로 진단.
-    예: /rnd_diagnose "/ask 커맨드가 응답이 없음"
+    봇 소스 코드를 GitHub에서 fetch하여 LLM 코드 리뷰를 수행한다.
+
+    - target_files: 리뷰할 파일 경로 리스트 (기본: DEFAULT_REVIEW_TARGETS)
+    - 각 파일은 앞부분 4000자만 잘라 LLM에 전달 (토큰 절약)
+    - 반환: 마크다운 형식의 리뷰 결과 텍스트
     """
-    prompt = f"""다음 이슈에 대한 진단과 해결책을 제시해주세요:
+    targets = target_files or DEFAULT_REVIEW_TARGETS
 
-**이슈**: {issue_description}
-
-다음 정보를 포함해 답변:
-1. 가능한 원인 (상위 3개)
-2. 각 원인별 확인 방법
-3. 예상 해결 방법
-4. 예방 조치
-
-시스템 컨텍스트:
-- Python 3.12 / discord.py 2.3.2
-- Railway 배포
-- OpenRouter 통합 (gpt-5.4-nano, claude-opus-4.7)
-- Notion API + APScheduler 사용
-"""
+    # GitHub에서 소스 코드 fetch
+    sources: list[tuple[str, str]] = []
     try:
-        result = await chat(
-            messages=[
-                {"role": "system", "content": SYSTEM_QA},
-                {"role": "user", "content": prompt},
-            ],
-            agent="gaechyo",
-            max_tokens=1800,
-            temperature=0.3,
-        )
-        embed = discord.Embed(
-            title="🔬 개쵸 — 이슈 진단",
-            description=result["content"][:3500],
-            color=0xF97316,
-        )
-        embed.add_field(
-            name="🎯 이슈",
-            value=f"`{issue_description[:200]}`",
-            inline=False,
-        )
-        embed.set_footer(
-            text=f"{result['model'].split('/')[-1]} · ${result['cost']:.5f}"
-        )
-        return embed
+        from utils import github_client
     except Exception as e:
-        from bot.embeds import embed_error
-        return embed_error("진단 실패", str(e))
+        log.exception(f"[diagnose] github_client import 실패: {e}")
+        return f"❌ GitHub 클라이언트 로드 실패: {type(e).__name__}: {e}"
 
+    for path in targets:
+        try:
+            # github_client에 통일된 fetch 함수가 있다고 가정 (fetch_file/get_file 등)
+            content: Optional[str] = None
+            for fn_name in ("fetch_file", "get_file", "read_file", "get_file_content"):
+                fn = getattr(github_client, fn_name, None)
+                if callable(fn):
+                    if asyncio.iscoroutinefunction(fn):
+                        content = await fn(path)
+                    else:
+                        content = fn(path)
+                    break
 
-# ── 4. 신규 봇 설계 ─────────────────────────────────────────────────
-async def design_new_bot(requirements: str) -> discord.Embed:
-    """
-    신규 봇 요구사항 → Claude Opus가 설계서 작성.
-    결과는 R&D 채널에도 자동 게시 (옵션).
-    """
-    try:
-        result = await chat(
-            messages=[
-                {"role": "system", "content": SYSTEM_BOT_DESIGN},
-                {"role": "user", "content": f"봇 요구사항:\n{requirements}"},
-            ],
-            agent="gaechyo",
-            tier="premium",   # 설계는 premium 사용
-            max_tokens=3000,
-            temperature=0.6,
-        )
-        embed = discord.Embed(
-            title="📐 개쵸 — 신규 봇 설계서",
-            description=result["content"][:3500],
-            color=0x8B5CF6,
-        )
-        embed.add_field(
-            name="🎯 요구사항",
-            value=f"
+            if content is None:
+                sources.append((path, "// (fetch 함수 미발견 — github_client 확인 필요)"))
+                continue
+
+            # 앞부분 4000자로 컷
+            snippet = content[:4000]
+            if len(content) > 4000:
+                snippet += "\n\n// ...(이하 생략)..."
+            sources.append((path, snippet))
+            log.info(f"[diagnose] {path} fetch 성공 ({len(content)} bytes)")
+        except Exception as e:
+            log.exception(f"[diagnose] {path} fetch 실패: {e}")
+            sources.append((path, f"// fetch 실패: {type(e).__name__}: {e}"))
+
+    # LLM에 전달할 프롬프트 구성 (f-string 중첩 회피: 외부 join 사용)
+    blocks: list[str] = []
+    for path, code in sources:
+        header = f"### 파일: `{path}`"
+        block = header + "\n
