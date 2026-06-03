@@ -1328,124 +1328,147 @@ async def setup_commands(bot: commands.Bot):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # ───────────────────────────────────────────────────────────
-    # 🛠️ 개쵸 자동 코드 수정
+    # 🤖 개쵸 — 자동 코드 변경 (자연어 요청 → 자동 분석)
     # ───────────────────────────────────────────────────────────
-    @bot.tree.command(name="code_propose", description="개쵸에게 코드 수정 요청")
+    @bot.tree.command(
+        name="code_propose",
+        description="자연어로 코드 변경 요청 (개쵸가 알아서 분석 + 수정)",
+    )
     @is_cho()
     @app_commands.describe(
-        path="수정할 파일 경로 (예: modules/rnd.py)",
-        instruction="변경 요청 내용",
+        request="변경 요청 (예: 디쵸 figma 연동, /money 응답 개선, ...)",
     )
     async def cmd_code_propose(
         interaction: discord.Interaction,
-        path: str,
-        instruction: str,
+        request: str,
     ):
         await interaction.response.defer(thinking=True)
         try:
-            from modules.code_modifier import generate_change_proposal
-            from bot.code_approval_view import CodeApprovalView
+            from modules.code_planner import create_planning_session
+            from bot.code_planning_view import PlanApprovalView
 
-            proposal = await generate_change_proposal(path, instruction)
+            # 진행 메시지
+            progress_embed = discord.Embed(
+                title="🔍 개쵸 — 분석 중...",
+                description=(
+                    f"**요청**: {request[:200]}\n\n"
+                    "1️⃣ 의도 분석 → 2️⃣ 코드베이스 스캔 → 3️⃣ 변경 계획 수립\n"
+                    "(약 30~60초 소요)"
+                ),
+                color=0xD97706,
+            )
+            progress_msg = await interaction.followup.send(embed=progress_embed)
 
-            if not proposal["success"]:
-                await _send_error(
-                    interaction,
-                    error_title="변경안 생성 실패",
-                    error=proposal["error"],
+            # 분석 파이프라인 실행
+            result = await create_planning_session(
+                user_request=request,
+                requester=interaction.user.name,
+            )
+
+            if not result["success"]:
+                err_embed = discord.Embed(
+                    title="❌ 분석 실패",
+                    description=result.get("error", "알 수 없는 오류"),
+                    color=0xE11D48,
                 )
+                await progress_msg.edit(embed=err_embed)
                 return
 
-            # Embed 생성
-            embed = discord.Embed(
-                title=f"🛠️ 개쵸 — 코드 변경 제안 (ID: `{proposal['id']}`)",
+            session = result["session"]
+            plan = session["plan"]
+            intent = session["intent"]
+
+            # 1차 승인 Embed
+            plan_embed = discord.Embed(
+                title=f"🤖 개쵸 — 변경 계획 (`{session['id']}`)",
                 description=(
-                    f"**파일**: `{proposal['path']}`\n"
-                    f"**요청**: {instruction[:300]}\n"
-                    f"**변경 라인**: {proposal['lines_changed']}줄\n\n"
-                    f"### 변경 요약\n{proposal['summary'][:1500]}"
+                    f"**요청**: {request[:300]}\n\n"
+                    f"### 💡 의도 분석\n"
+                    f"• **의도**: {intent.get('intent', '')[:200]}\n"
+                    f"• **스코프**: `{intent.get('scope', '?')}`\n"
+                    f"• **리스크**: `{intent.get('risk', '?')}`\n"
+                    f"• **대상**: `{intent.get('target_agent', '미지정')}`\n\n"
+                    f"### 📋 변경 계획\n"
+                    f"{plan.get('plan_summary', '')[:1000]}"
                 ),
                 color=0xD97706,
             )
 
-            # Diff 미리보기 (첫 2,000자)
-            diff_preview = proposal["diff"][:2000]
-            if diff_preview:
-                embed.add_field(
-                    name="📋 Diff 미리보기",
-                    value=f"```diff\n{diff_preview}\n```",
+            files = plan.get("files", [])
+            if files:
+                file_lines = []
+                for f in files[:10]:
+                    action_emoji = "🆕" if f.get("action") == "create" else "✏️"
+                    file_lines.append(
+                        f"{action_emoji} `{f['path']}` "
+                        f"(~{f.get('estimated_lines', '?')}줄)\n"
+                        f"   └ {f.get('purpose', '')[:100]}"
+                    )
+                plan_embed.add_field(
+                    name=f"📂 변경 예정 파일 ({len(files)}개)",
+                    value="\n\n".join(file_lines)[:1024],
                     inline=False,
                 )
 
-            embed.set_footer(text="⚠️ 코드를 검토하시고 승인 여부를 결정해주세요 (10분 후 자동 만료)")
+            deps = plan.get("requires_dependencies", [])
+            if deps:
+                plan_embed.add_field(
+                    name="📦 추가 패키지",
+                    value="\n".join(f"• `{d}`" for d in deps),
+                    inline=False,
+                )
 
-            view = CodeApprovalView(
-                proposal_id=proposal["id"],
+            plan_embed.set_footer(
+                text=f"예상 라인: {plan.get('estimated_total_lines', '?')}줄 · "
+                     f"비용: ${session['total_cost']:.5f}",
+            )
+
+            view = PlanApprovalView(
+                session_id=session["id"],
                 owner_id=interaction.user.id,
                 timeout=600,
             )
 
-            await _send_response(
-                interaction, embed,
-                query=f"/code_propose {path}",
-                attach_files=True,
-            )
-            # View가 있는 메시지를 별도로 전송
-            await interaction.followup.send(
-                content="👇 **승인/거부 버튼**",
-                view=view,
-            )
+            await progress_msg.edit(embed=plan_embed, view=view)
 
         except Exception as e:
-            await _send_error(interaction, error_title="코드 제안 오류", error=e)
+            await _send_error(interaction, error_title="코드 분석 오류", error=e)
 
-    @bot.tree.command(name="code_merge", description="PR 자동 머지")
+    @bot.tree.command(name="code_sessions", description="최근 코드 변경 세션 목록")
     @is_cho()
-    @app_commands.describe(pr_number="머지할 PR 번호")
-    async def cmd_code_merge(interaction: discord.Interaction, pr_number: int):
-        await interaction.response.defer(thinking=True)
-        try:
-            from utils.github_client import merge_pr
-            result = await merge_pr(pr_number)
-            if result["success"]:
-                embed = embed_success(
-                    "✅ PR 머지 완료",
-                    f"PR #{pr_number} 머지됨\nRailway 자동 재배포 시작...",
-                )
-            else:
-                embed = embed_error("머지 실패", result.get("error", "알 수 없는 오류"))
-            await _send_response(interaction, embed, query=f"/code_merge {pr_number}")
-        except Exception as e:
-            await _send_error(interaction, error_title="머지 오류", error=e)
+    async def cmd_code_sessions(interaction: discord.Interaction):
+        from modules.code_planner import list_sessions
+        sessions = list_sessions(limit=15)
 
-    @bot.tree.command(name="code_proposals", description="최근 변경 제안 목록")
-    @is_cho()
-    async def cmd_code_proposals(interaction: discord.Interaction):
-        from modules.code_modifier import list_recent_proposals
-        proposals = list_recent_proposals(limit=15)
-
-        if not proposals:
-            embed = embed_info("📋 변경 제안", "최근 제안이 없습니다.")
+        if not sessions:
+            embed = embed_info("📋 코드 세션", "최근 세션이 없습니다.")
         else:
             lines = []
-            for p in proposals:
-                status_emoji = {
-                    "pending": "⏳",
+            for s in sessions:
+                emoji = {
+                    "plan_pending": "🟡",
+                    "plan_approved": "🔵",
+                    "generating": "🔄",
+                    "code_pending": "🟠",
+                    "code_approved": "🟢",
+                    "applying": "🚀",
                     "applied": "✅",
-                    "rejected": "❌",
-                    "failed": "🚨",
-                }.get(p["status"], "❓")
+                    "failed": "❌",
+                }.get(s["status"], "❓")
+                rejected = s["status"].startswith("rejected")
+                if rejected:
+                    emoji = "❌"
+
                 lines.append(
-                    f"{status_emoji} `{p['id']}` — `{p['path']}` "
-                    f"({p['lines_changed']}줄)\n"
-                    f"　{p['instruction'][:80]}"
+                    f"{emoji} `{s['id']}` — {s['user_request'][:60]}\n"
+                    f"   └ 상태: `{s['status']}` · 비용: ${s.get('total_cost', 0):.4f}"
                 )
             embed = discord.Embed(
-                title="📋 최근 코드 변경 제안",
+                title="📋 최근 코드 변경 세션",
                 description="\n\n".join(lines),
                 color=0x4F46E5,
             )
-        await _send_response(interaction, embed, query="/code_proposals", ephemeral=True)
+        await _send_response(interaction, embed, query="/code_sessions", ephemeral=True)
 
     # ───────────────────────────────────────────────────────────
     # 시스템
