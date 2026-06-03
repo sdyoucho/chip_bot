@@ -2,10 +2,14 @@
 modules/code_publisher.py
 개쵸 코드 변경을 R&D 포럼 채널에 자동 게시.
 
-해쵸의 utils/forum_publisher.py와 동일한 패턴으로 동작.
-스레드 생성 → 변경 내역 + diff 게시.
+🆕 v3 변경:
+- utils/message_splitter.py 기능 100% 활용
+- send_long_text(), send_long_embed() 사용
+- smart_split_text()로 마크다운/코드블록 보호 분할
+- 거대 diff는 .md/.diff 파일 자동 첨부
 """
 
+import io
 import logging
 import os
 from datetime import datetime
@@ -13,12 +17,20 @@ from typing import Optional
 
 import discord
 
+from utils.message_splitter import (
+    smart_split_text,
+    SAFE_CHUNK_LENGTH,
+    ATTACH_FILE_THRESHOLD,
+    send_long_text,
+    send_long_embed,
+)
+
 log = logging.getLogger(__name__)
 
-# 포럼 게시 길이 제한
+# 게시 길이 임계치
 MAX_THREAD_NAME = 100
-MAX_FIRST_MESSAGE = 3500
-MAX_DIFF_PER_MESSAGE = 3500
+MAX_DIFF_INLINE = 1500       # 이 이상이면 파일/Gist
+MAX_DIFF_GIST = 80000        # 이 이상이면 Gist
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -26,7 +38,7 @@ MAX_DIFF_PER_MESSAGE = 3500
 # ═══════════════════════════════════════════════════════════════════
 
 def _get_rnd_forum_channel(bot: discord.Client) -> Optional[discord.ForumChannel]:
-    """R&D 포럼 채널 조회 (env: RND_FORUM_CHANNEL_ID)."""
+    """R&D 포럼 채널 조회."""
     ch_id_str = os.getenv("RND_FORUM_CHANNEL_ID", "").strip()
     if not ch_id_str.isdigit():
         return None
@@ -38,7 +50,51 @@ def _get_rnd_forum_channel(bot: discord.Client) -> Optional[discord.ForumChannel
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 메인 게시 API
+# GitHub Gist 업로드 (매우 큰 파일용)
+# ═══════════════════════════════════════════════════════════════════
+
+async def _upload_to_gist(
+    filename: str,
+    content: str,
+    description: str = "chip_bot auto code change",
+) -> Optional[str]:
+    """매우 긴 콘텐츠를 GitHub Gist로 업로드."""
+    try:
+        import aiohttp
+        from utils.github_client import _get_token
+
+        token = _get_token()
+        if not token:
+            log.warning("Gist 업로드 불가 — GitHub Token 없음")
+            return None
+
+        url = "https://api.github.com/gists"
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "cho-bot/1.0",
+        }
+        payload = {
+            "description": description[:200],
+            "public": False,
+            "files": {filename: {"content": content[:1_000_000]}},
+        }
+
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 201:
+                    log.warning(f"Gist 업로드 실패: HTTP {resp.status}")
+                    return None
+                data = await resp.json()
+                return data.get("html_url")
+    except Exception as e:
+        log.warning(f"Gist 업로드 예외: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 메인 API
 # ═══════════════════════════════════════════════════════════════════
 
 async def publish_code_session(
@@ -47,38 +103,36 @@ async def publish_code_session(
     session: dict,
     pr_result: dict,
 ) -> bool:
-    """
-    코드 변경 세션을 R&D 포럼 채널의 새 스레드로 게시.
-
-    Args:
-        bot: Discord client
-        session: code_planner의 세션 dict
-        pr_result: apply_session_to_github 반환값
-
-    Returns:
-        성공 여부
-    """
+    """코드 변경 세션을 R&D 포럼 스레드로 게시."""
     channel = _get_rnd_forum_channel(bot)
     if not channel:
         log.info("R&D 포럼 채널 미설정 — 게시 건너뜀")
         return False
 
     try:
-        # 1) 스레드 이름 + 첫 메시지 생성
         thread_name = _build_thread_name(session, pr_result)
         first_message = _build_first_message(session, pr_result)
 
-        # 2) 스레드 생성
+        # 첫 메시지가 2,000자 초과해도 thread.create는 한 번에 보낼 수 없으니
+        # 안전한 길이로 잘라서 시작 후 나머지는 추가 전송
+        first_message_short = first_message[:1900]
+        first_message_rest = first_message[1900:] if len(first_message) > 1900 else ""
+
+        # 스레드 생성
         thread, _ = await channel.create_thread(
             name=thread_name,
-            content=first_message,
+            content=first_message_short,
             auto_archive_duration=10080,  # 7일
         )
 
-        # 3) 파일별 변경 내용 게시
+        # 첫 메시지의 나머지가 있으면 추가 게시
+        if first_message_rest:
+            await send_long_text(thread, first_message_rest)
+
+        # 각 파일 게시
         await _post_file_changes(thread, session)
 
-        # 4) 마지막: PR 링크 + 머지 명령 안내
+        # 푸터 게시
         await _post_footer(thread, pr_result)
 
         log.info(f"R&D 포럼 게시 완료: {thread.id} ({thread_name})")
@@ -93,27 +147,21 @@ async def publish_code_session(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 스레드 이름 생성
+# 스레드 이름/메시지 빌더
 # ═══════════════════════════════════════════════════════════════════
 
 def _build_thread_name(session: dict, pr_result: dict) -> str:
-    """스레드 이름 (100자 제한)."""
     intent = session.get("intent", {}).get("intent", "")
     request = session.get("user_request", "")
     pr_num = pr_result.get("pr_number", "?")
 
     title_text = intent or request or "코드 변경"
     name = f"[개쵸 #PR{pr_num}] {title_text}"
-
     return name[:MAX_THREAD_NAME]
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 첫 메시지 (스레드 본문)
-# ═══════════════════════════════════════════════════════════════════
-
 def _build_first_message(session: dict, pr_result: dict) -> str:
-    """포럼 스레드의 첫 메시지 (전체 요약)."""
+    """포럼 스레드 첫 메시지 (전체 요약)."""
     intent = session.get("intent", {})
     plan = session.get("plan", {})
     proposals = session.get("file_proposals", [])
@@ -124,7 +172,7 @@ def _build_first_message(session: dict, pr_result: dict) -> str:
         f"**📅 발행 시각**: {datetime.now():%Y-%m-%d %H:%M KST}",
         f"**🔗 PR**: [#{pr_result.get('pr_number', '?')}]({pr_result.get('pr_url', '')})",
         f"**🌿 브랜치**: `{pr_result.get('branch', '')}`",
-        f"**📦 커밋**: {pr_result.get('commits_succeeded', 0)}/{pr_result.get('commits_total', 0)} 성공",
+        f"**📦 커밋**: {pr_result.get('commits_succeeded', 0)}/{pr_result.get('commits_total', 0)}",
         f"**💰 비용**: ${session.get('total_cost', 0):.5f}",
         "",
         "## 📌 요청",
@@ -137,17 +185,14 @@ def _build_first_message(session: dict, pr_result: dict) -> str:
         f"- **대상**: `{intent.get('target_agent', '미지정')}`",
         "",
         "## 📋 변경 계획 요약",
-        plan.get("plan_summary", "(요약 없음)")[:1200],
+        plan.get("plan_summary", "(요약 없음)")[:800],
         "",
         f"## 📂 변경 파일 ({len(proposals)}개)",
     ]
 
-    # 파일 목록
     for p in proposals[:15]:
         emoji = "🆕" if p.get("action") == "create" else "✏️"
-        lines.append(
-            f"- {emoji} `{p['path']}` ({p.get('lines_changed', 0)}줄)"
-        )
+        lines.append(f"- {emoji} `{p['path']}` ({p.get('lines_changed', 0)}줄)")
 
     if len(proposals) > 15:
         lines.append(f"- ... 외 {len(proposals) - 15}개")
@@ -159,77 +204,119 @@ def _build_first_message(session: dict, pr_result: dict) -> str:
         for d in deps:
             lines.append(f"- `{d}`")
 
-    text = "\n".join(lines)
-    return text[:MAX_FIRST_MESSAGE]
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 파일별 변경 내용 게시
+# 파일별 게시 (message_splitter 활용)
 # ═══════════════════════════════════════════════════════════════════
 
 async def _post_file_changes(thread: discord.Thread, session: dict) -> None:
-    """각 변경 파일의 상세 내용을 별도 메시지로 게시."""
+    """각 변경 파일의 상세 내용을 안전하게 게시."""
     proposals = session.get("file_proposals", [])
 
     for i, p in enumerate(proposals, 1):
         try:
-            # 파일 요약 메시지
-            summary_text = _build_file_summary(p, i, len(proposals))
-            await thread.send(content=summary_text)
-
-            # Diff 메시지 (별도)
-            diff_chunks = _split_diff(p)
-            for j, chunk in enumerate(diff_chunks, 1):
-                prefix = (
-                    f"📋 **`{p['path']}` Diff "
-                    f"({j}/{len(diff_chunks)})**\n"
-                    if len(diff_chunks) > 1 else
-                    f"📋 **`{p['path']}` Diff**\n"
-                )
-                await thread.send(content=f"{prefix}```diff\n{chunk}\n```")
-
-        except discord.HTTPException as e:
-            log.warning(f"파일 {p['path']} 게시 실패: {e}")
+            await _post_single_file(thread, p, i, len(proposals))
+        except Exception as e:
+            log.exception(f"파일 {p['path']} 게시 중 예외: {e}")
             try:
-                await thread.send(
-                    content=f"⚠️ `{p['path']}` 게시 실패 (메시지 길이 초과 등): {e}"[:1000],
+                await send_long_text(
+                    thread,
+                    f"⚠️ `{p['path']}` 게시 중 오류: {str(e)[:200]}\n"
+                    f"GitHub PR에서 직접 확인해주세요.",
                 )
             except Exception:
                 pass
 
 
-def _build_file_summary(proposal: dict, idx: int, total: int) -> str:
-    """파일 한 개의 요약 메시지."""
+async def _post_single_file(
+    thread: discord.Thread,
+    proposal: dict,
+    idx: int,
+    total: int,
+) -> None:
+    """파일 한 개의 변경 내용 게시 — message_splitter로 길이 무관 처리."""
+    path = proposal["path"]
+    diff = proposal.get("diff", "") or ""
+    new_content = proposal.get("new_content", "")
+    summary = proposal.get("summary", "").strip()
     action_emoji = "🆕" if proposal.get("action") == "create" else "✏️"
     action_text = "신규 파일" if proposal.get("action") == "create" else "수정"
 
-    lines = [
-        f"## {action_emoji} `{proposal['path']}` ({idx}/{total})",
+    # ─── Step 1: 파일 요약 메시지 ─────────────────────────────
+    summary_lines = [
+        f"## {action_emoji} `{path}` ({idx}/{total})",
         "",
         f"**동작**: {action_text}",
         f"**변경 라인**: {proposal.get('lines_changed', 0)}줄",
+        f"**파일 크기**: {len(new_content):,} 문자",
     ]
 
-    summary = proposal.get("summary", "").strip()
     if summary:
-        lines.append("")
-        lines.append("**🔍 변경 요약**:")
-        lines.append(summary[:1500])
+        summary_lines.extend([
+            "",
+            "**🔍 변경 요약**:",
+            summary,  # 길이 제한 없음 — splitter가 알아서 처리
+        ])
 
-    return "\n".join(lines)[:1900]  # Discord 메시지 한계 대비
+    summary_message = "\n".join(summary_lines)
+    await send_long_text(thread, summary_message, max_messages=4)
+
+    # ─── Step 2: Diff 게시 ──────────────────────────────────
+    # diff가 없으면 new_content 사용 (신규 파일)
+    content_to_show = diff or new_content
+    if not content_to_show:
+        await send_long_text(thread, f"📋 **`{path}`**: (내용 없음)")
+        return
+
+    content_size = len(content_to_show)
+    log.debug(f"파일 {path} 게시 크기: {content_size:,}자")
+
+    # Case 1: 작은 diff (인라인 코드 블록)
+    if content_size <= MAX_DIFF_INLINE:
+        block_lang = "diff" if diff else _guess_lang(path)
+        message = (
+            f"📋 **`{path}` {'Diff' if diff else '내용'}**\n"
+            f"```{block_lang}\n{content_to_show}\n```"
+        )
+        await send_long_text(thread, message, max_messages=2)
+        return
+
+    # Case 2: 중간 크기 (smart_split_text로 안전 분할)
+    if content_size <= MAX_DIFF_GIST:
+        await _post_diff_with_splitter(thread, path, content_to_show, is_diff=bool(diff))
+        return
+
+    # Case 3: 매우 큰 콘텐츠 → Gist + 파일 첨부
+    await _post_huge_diff(thread, path, content_to_show, is_diff=bool(diff))
 
 
-def _split_diff(proposal: dict) -> list[str]:
-    """Diff를 메시지 크기에 맞게 분할."""
-    diff = proposal.get("diff", "") or proposal.get("new_content", "")
-    if not diff:
-        return ["(diff 없음)"]
+async def _post_diff_with_splitter(
+    thread: discord.Thread,
+    path: str,
+    content: str,
+    *,
+    is_diff: bool = True,
+) -> None:
+    """
+    중간 크기 diff를 message_splitter 활용해 분할 게시.
+    """
+    block_lang = "diff" if is_diff else _guess_lang(path)
+    content_type = "Diff" if is_diff else "내용"
 
-    # 코드 블록 안전 분할
+    # 헤더 메시지 먼저
+    header = f"📋 **`{path}` {content_type}** ({len(content):,}자)"
+    await send_long_text(thread, header, max_messages=1)
+
+    # 코드 블록 안 내용을 안전한 청크로 분할
+    # ```diff\n...\n``` 오버헤드(15자) 고려해서 1,800자 정도로 청크
+    chunk_inner_max = 1800
+
     chunks = []
     current = ""
-    for line in diff.splitlines(keepends=True):
-        if len(current) + len(line) > MAX_DIFF_PER_MESSAGE:
+    for line in content.splitlines(keepends=True):
+        if len(current) + len(line) > chunk_inner_max:
             chunks.append(current)
             current = line
         else:
@@ -237,20 +324,119 @@ def _split_diff(proposal: dict) -> list[str]:
     if current:
         chunks.append(current)
 
-    # 최대 5개로 제한 (메시지 폭주 방지)
-    if len(chunks) > 5:
-        chunks = chunks[:5]
-        chunks[-1] += "\n... (이하 생략, 전체 diff는 GitHub PR에서 확인)"
+    # 너무 많이 분할되면 파일 첨부로 폴백
+    if len(chunks) > 8:
+        await _send_as_file(thread, path, content, is_diff)
+        return
 
-    return chunks
+    # 각 청크를 코드 블록으로 감싸서 게시
+    for j, chunk in enumerate(chunks, 1):
+        prefix = (
+            f"📋 **`{path}` {content_type} ({j}/{len(chunks)})**"
+            if len(chunks) > 1 else f"📋 **`{path}` {content_type}**"
+        )
+        block = f"{prefix}\n```{block_lang}\n{chunk}\n```"
+        # send_long_text가 내부적으로 다시 분할할 수 있음
+        ok = await send_long_text(thread, block, max_messages=2)
+        if not ok:
+            log.warning(f"청크 {j}/{len(chunks)} 전송 실패 — 파일 첨부로 폴백")
+            await _send_as_file(thread, path, content, is_diff)
+            return
+
+
+async def _post_huge_diff(
+    thread: discord.Thread,
+    path: str,
+    content: str,
+    *,
+    is_diff: bool = True,
+) -> None:
+    """매우 큰 diff/콘텐츠는 Gist 업로드 + 파일 첨부."""
+    safe_path = path.replace("/", "_")
+    ext = "diff" if is_diff else _guess_ext(path)
+    filename = f"{safe_path}.{ext}"
+
+    # Gist 업로드 시도
+    gist_url = await _upload_to_gist(
+        filename=filename,
+        content=content,
+        description=f"chip_bot {'diff' if is_diff else 'content'} for {path}",
+    )
+
+    if gist_url:
+        msg = (
+            f"📋 **`{path}` {'Diff' if is_diff else '내용'}**\n"
+            f"⚠️ 매우 큰 콘텐츠 ({len(content):,}자) — GitHub Gist 업로드\n"
+            f"🔗 **[Gist에서 보기]({gist_url})**"
+        )
+        await send_long_text(thread, msg, max_messages=1)
+    else:
+        # Gist 실패 → 파일 첨부 폴백
+        await _send_as_file(thread, path, content, is_diff)
+
+
+async def _send_as_file(
+    thread: discord.Thread,
+    path: str,
+    content: str,
+    is_diff: bool,
+) -> None:
+    """파일 첨부로 폴백."""
+    safe_path = path.replace("/", "_")
+    ext = "diff" if is_diff else _guess_ext(path)
+    filename = f"{safe_path}.{ext}"
+
+    try:
+        file_obj = discord.File(
+            io.BytesIO(content.encode("utf-8")),
+            filename=filename,
+        )
+        await thread.send(
+            content=(
+                f"📋 **`{path}` {'Diff' if is_diff else '내용'}** "
+                f"({len(content):,}자)\n"
+                "⚠️ 길이가 커서 파일로 첨부합니다 — 다운로드 후 확인하세요."
+            )[:1900],
+            file=file_obj,
+        )
+    except Exception as e:
+        log.error(f"파일 첨부 실패 ({path}): {e}")
+        try:
+            await send_long_text(
+                thread,
+                f"⚠️ `{path}` 게시 실패 ({len(content):,}자)\n"
+                "GitHub PR에서 직접 확인해주세요.",
+            )
+        except Exception:
+            pass
+
+
+def _guess_lang(path: str) -> str:
+    """파일 경로에서 코드 블록 언어 추정."""
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    mapping = {
+        "py": "python", "js": "javascript", "ts": "typescript",
+        "tsx": "tsx", "jsx": "jsx",
+        "yaml": "yaml", "yml": "yaml",
+        "json": "json", "md": "markdown",
+        "html": "html", "css": "css",
+        "sh": "bash", "txt": "",
+    }
+    return mapping.get(ext, "")
+
+
+def _guess_ext(path: str) -> str:
+    """파일 확장자 추출 (없으면 txt)."""
+    if "." in path:
+        return path.rsplit(".", 1)[-1].lower()
+    return "txt"
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 푸터 (PR 링크 + 액션)
+# 푸터
 # ═══════════════════════════════════════════════════════════════════
 
 async def _post_footer(thread: discord.Thread, pr_result: dict) -> None:
-    """마지막 메시지 — PR 액션 안내."""
     pr_num = pr_result.get("pr_number", "?")
     pr_url = pr_result.get("pr_url", "")
 
@@ -258,19 +444,15 @@ async def _post_footer(thread: discord.Thread, pr_result: dict) -> None:
         "---\n"
         "## 🚀 다음 단계\n"
         "\n"
-        f"### 📥 PR 머지\n"
-        f"GitHub에서 직접 머지: {pr_url}\n"
-        f"또는 Discord에서: `/code_merge {pr_num}`\n"
+        "### 📥 PR 머지\n"
+        f"GitHub: {pr_url}\n"
+        f"Discord: `/code_merge {pr_num}`\n"
         "\n"
-        f"### 🔄 자동 재배포\n"
-        f"PR 머지 후 Railway가 자동 재배포합니다 (약 2~3분 소요).\n"
+        "### 🔄 자동 재배포\n"
+        "PR 머지 후 Railway가 자동 재배포합니다 (약 2~3분).\n"
         "\n"
-        f"### 🐛 문제 발생 시\n"
-        f"`/rnd_diagnose` 로 진단 요청\n"
-        f"`/code_sessions` 로 이력 확인"
+        "### 🐛 문제 발생 시\n"
+        "`/rnd_diagnose` 또는 `/code_sessions`"
     )
 
-    try:
-        await thread.send(content=text[:1990])
-    except Exception as e:
-        log.warning(f"푸터 게시 실패: {e}")
+    await send_long_text(thread, text, max_messages=2)

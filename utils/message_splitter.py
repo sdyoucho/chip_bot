@@ -535,49 +535,6 @@ async def edit_long_embed(
         except Exception:
             return False
 
-        total_length = _calculate_total_length(embed)
-
-        # 첫 Embed로 원본 메시지 편집
-        await message.edit(embed=embeds[0], view=view, attachments=[])
-
-        # 추가 Embed들 전송
-        sender = interaction if interaction is not None else message.channel
-
-        for i, extra in enumerate(embeds[1:], start=2):
-            try:
-                await _safe_send(sender, embed=extra)
-            except Exception as e:
-                log.warning(f"추가 Embed {i} 전송 실패: {e}")
-
-        # 파일 첨부
-        if attach_files and total_length >= ATTACH_FILE_THRESHOLD:
-            try:
-                md_file = embed_to_md_file(embed, query=query)
-                await _safe_send(
-                    sender,
-                    content="📎 **전체 내용 — 백업 파일**",
-                    file=md_file,
-                )
-            except Exception as e:
-                log.warning(f"파일 첨부 실패: {e}")
-
-        return True
-
-    except discord.HTTPException as e:
-        log.error(f"edit_long_embed HTTP 오류: {e}")
-        sender = interaction if interaction is not None else message.channel
-        try:
-            return await send_long_embed(
-                sender, embed, query=query, attach_files=attach_files,
-            )
-        except Exception:
-            return False
-
-    except Exception as e:
-        log.exception(f"edit_long_embed 실패: {e}")
-        return False
-
-
 # ═══════════════════════════════════════════════════════════════════
 # 내부 헬퍼
 # ═══════════════════════════════════════════════════════════════════

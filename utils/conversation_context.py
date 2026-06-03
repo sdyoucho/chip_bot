@@ -129,3 +129,90 @@ def detect_context_reference(query: str) -> bool:
     ]
     query_lower = query.lower()
     return any(pattern in query_lower for pattern in reference_patterns)
+
+# ═══════════════════════════════════════════════════════════════════
+# 통합 헬퍼 — interaction 한 번에 컨텍스트 + 참조 감지 + 포맷팅
+# ═══════════════════════════════════════════════════════════════════
+
+async def collect_context_if_needed(
+    interaction: discord.Interaction,
+    query: str,
+    *,
+    force: bool = False,
+    max_depth: int = MAX_CONTEXT_MESSAGES,
+) -> dict:
+    """
+    쿼리에 참조 표현이 있거나 force=True면 컨텍스트 수집.
+
+    Args:
+        interaction: Discord Interaction
+        query: 사용자 쿼리
+        force: True면 무조건 컨텍스트 수집
+        max_depth: 최대 메시지 수
+
+    Returns:
+        {
+            "context_text": str,        # LLM 프롬프트용 포맷
+            "messages": list[dict],     # 원본 메시지 리스트
+            "has_reference": bool,      # 참조 표현 감지 여부
+            "should_use": bool,         # 사용 권장 여부
+            "summary": str,             # UI 표시용 한 줄 요약
+        }
+    """
+    result = {
+        "context_text": "",
+        "messages": [],
+        "has_reference": False,
+        "should_use": False,
+        "summary": "",
+    }
+
+    try:
+        has_reference = detect_context_reference(query)
+        result["has_reference"] = has_reference
+
+        # 참조 표현이 있거나 force일 때만 실제 수집
+        if not (force or has_reference):
+            return result
+
+        messages = await get_reply_context(interaction, max_depth=max_depth)
+        if not messages:
+            return result
+
+        context_text = format_context_for_prompt(messages)
+
+        result["messages"] = messages
+        result["context_text"] = context_text
+        result["should_use"] = True
+        result["summary"] = (
+            f"💬 컨텍스트 {len(messages)}개 메시지"
+            + (" (참조 표현 감지)" if has_reference else " (자동)")
+        )
+
+        log.info(
+            f"컨텍스트 수집: {len(messages)}개 메시지 "
+            f"({len(context_text):,}자), 참조감지={has_reference}"
+        )
+
+        return result
+
+    except Exception as e:
+        log.warning(f"collect_context_if_needed 실패: {e}")
+        return result
+
+
+def enrich_query_with_context(query: str, context_text: str) -> str:
+    """
+    원본 query 앞에 컨텍스트를 자연스럽게 결합.
+
+    Returns:
+        LLM에 전달할 enriched query
+    """
+    if not context_text:
+        return query
+
+    return (
+        f"{context_text}\n\n"
+        f"--- 현재 요청 ---\n"
+        f"{query}"
+    )

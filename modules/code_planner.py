@@ -274,14 +274,35 @@ async def create_plan(
 # Stage 4: 세션 생성
 # ═══════════════════════════════════════════════════════════════════
 
-async def create_planning_session(user_request: str, requester: str = "Cho") -> dict:
-    """전체 분석 파이프라인 실행 → 세션 생성."""
+async def create_planning_session(
+    user_request: str,
+    requester: str = "Cho",
+    *,
+    conversation_context: str = "",   # 🆕 이전 대화 맥락
+) -> dict:
+    """전체 분석 파이프라인 실행 → 세션 생성.
+
+    Args:
+        user_request: 사용자 요청 (자연어)
+        requester: 요청자 이름
+        conversation_context: 이전 Discord 대화 컨텍스트 (선택)
+    """
     session_id = str(uuid.uuid4())[:8]
 
     log.info(f"[{session_id}] 자동 계획 시작: {user_request[:80]}")
+    if conversation_context:
+        log.info(f"[{session_id}] 컨텍스트 포함: {len(conversation_context):,}자")
 
-    # Stage 1: 의도 분석
-    intent = await analyze_intent(user_request)
+    # 🆕 컨텍스트가 있으면 user_request 앞에 추가하여 LLM에 전달
+    enriched_request = user_request
+    if conversation_context:
+        enriched_request = (
+            f"{conversation_context}\n\n"
+            f"--- 현재 요청 ---\n{user_request}"
+        )
+
+    # Stage 1: 의도 분석 (enriched 사용)
+    intent = await analyze_intent(enriched_request)
     if not intent.get("success"):
         return {"success": False, "error": f"의도 분석 실패: {intent.get('error')}"}
 
@@ -321,7 +342,7 @@ async def create_planning_session(user_request: str, requester: str = "Cho") -> 
     log.info(f"[{session_id}] 스캔: {codebase['total_files']}개 파일")
 
     # Stage 3: 계획 수립
-    plan = await create_plan(user_request, intent, codebase)
+    plan = await create_plan(enriched_request, intent, codebase)
     if not plan.get("success"):
         return {"success": False, "error": f"계획 수립 실패: {plan.get('error')}"}
 
@@ -330,7 +351,8 @@ async def create_planning_session(user_request: str, requester: str = "Cho") -> 
     # 세션 저장
     session = {
         "id": session_id,
-        "user_request": user_request,
+        "user_request": user_request,           # 원본 (포럼/UI 표시용)
+        "enriched_request": enriched_request,   # 🆕 컨텍스트 포함 버전
         "requester": requester,
         "intent": intent,
         "codebase_summary": {
