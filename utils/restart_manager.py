@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import json
 import logging
@@ -191,7 +192,7 @@ async def request_restart(
 # 자동 재부팅 스케줄러 (KST 기준)
 # ═══════════════════════════════════════════════════════════════════
 
-def setup_auto_restart(bot, hour: int = None, minute: int = None) -> None:
+def setup_auto_restart(bot, hour: Optional[int] = None, minute: Optional[int] = None) -> None:
     """
     매일 정해진 KST 시각에 자동 재부팅 스케줄 등록.
 
@@ -211,6 +212,7 @@ def setup_auto_restart(bot, hour: int = None, minute: int = None) -> None:
         _global_scheduler = AsyncIOScheduler(timezone=KST)
 
     async def _auto_reboot():
+        """자동 재부팅 콜백."""
         await request_restart(
             bot,
             reason=f"자동 재부팅 ({hour:02d}:{minute:02d} KST 정기 점검)",
@@ -335,7 +337,7 @@ async def send_restart_notification(bot) -> None:
         from modules.rnd import post_to_rnd_channel
         ok = await post_to_rnd_channel(
             bot, category="maintenance",
-            title="재부팅 완료",
+            title="📋 재부팅 완료",
             content=(
                 f"사유: {state.get('reason', '미상')}\n"
                 f"요청자: {state.get('requested_by', 'system')}"
@@ -351,109 +353,3 @@ async def send_restart_notification(bot) -> None:
         log.info(f"재부팅 알림 전송 완료 ({format_kst(now_kst())})")
     except Exception as e:
         log.warning(f"재부팅 알림 전송 실패: {e}")
-```
-
-</details>
-
-## ✅ `/uptime`, `/restart_schedule` 커맨드 KST 표시 보강
-
-<details open>
-<summary><b>📋 bot/commands.py — 관련 커맨드 교체</b></summary>
-
-기존 `cmd_uptime`과 `cmd_restart_schedule`을 다음으로 교체:
-
-```python
-    @bot.tree.command(name="uptime", description="봇 가동 시간 (KST 기준)")
-    @is_cho()
-    async def cmd_uptime(interaction: discord.Interaction):
-        from utils.restart_manager import (
-            get_uptime, get_start_time, now_kst, format_kst,
-        )
-        embed = discord.Embed(title="⏱️ 봇 가동 현황", color=0x4F46E5)
-        embed.add_field(name="가동 시간", value=get_uptime(), inline=False)
-        embed.add_field(
-            name="시작 시각 (KST)",
-            value=format_kst(get_start_time()),
-            inline=False,
-        )
-        embed.add_field(
-            name="현재 시각 (KST)",
-            value=format_kst(now_kst()),
-            inline=False,
-        )
-        embed.add_field(name="서버 수", value=f"{len(bot.guilds)}개", inline=True)
-        embed.set_footer(text="모든 시각은 한국 표준시(KST, UTC+9) 기준")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @bot.tree.command(name="restart_schedule", description="자동 재부팅 시각 변경 (KST)")
-    @is_cho()
-    @app_commands.describe(
-        hour="시 (0~23 KST, 비우면 현재 설정 조회)",
-        minute="분 (0~59, 기본 0)",
-    )
-    async def cmd_restart_schedule(
-        interaction: discord.Interaction,
-        hour: int | None = None,
-        minute: int = 0,
-    ):
-        from utils.restart_manager import (
-            reschedule_auto_restart, get_restart_schedule, format_kst,
-        )
-
-        if hour is None:
-            schedule = get_restart_schedule()
-            embed = discord.Embed(
-                title="⏰ 자동 재부팅 스케줄 (KST)",
-                color=0x4F46E5,
-            )
-            embed.add_field(
-                name="📅 현재 설정",
-                value=f"매일 **{schedule['hour']:02d}:{schedule['minute']:02d} KST**",
-                inline=False,
-            )
-            if schedule["next_run"]:
-                embed.add_field(
-                    name="⏭️ 다음 실행",
-                    value=format_kst(schedule["next_run"]),
-                    inline=False,
-                )
-            embed.add_field(
-                name="🌏 시간대",
-                value=schedule.get("timezone", "Asia/Seoul"),
-                inline=True,
-            )
-            embed.add_field(
-                name="🔧 스케줄러",
-                value="✅ 동작 중" if schedule["scheduler_running"] else "❌ 정지",
-                inline=True,
-            )
-            embed.add_field(
-                name="🕐 현재 KST",
-                value=format_kst(schedule["current_kst"]),
-                inline=False,
-            )
-            embed.set_footer(text="변경: /restart_schedule hour:N minute:N")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        result = reschedule_auto_restart(hour, minute)
-
-        if result["success"]:
-            embed = discord.Embed(
-                title="✅ 재부팅 스케줄 변경",
-                description=result["message"],
-                color=0x059669,
-            )
-            if result["next_run"]:
-                embed.add_field(
-                    name="⏭️ 다음 실행 (KST)",
-                    value=format_kst(result["next_run"]),
-                    inline=False,
-                )
-        else:
-            embed = discord.Embed(
-                title="❌ 변경 실패",
-                description=result["message"],
-                color=0xE11D48,
-            )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
