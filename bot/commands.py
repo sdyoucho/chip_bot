@@ -19,11 +19,13 @@ Discord 슬래시 커맨드 등록 + 헬퍼 함수.
 # ═══════════════════════════════════════════════════════════════════
 import asyncio
 import io
+import json
 import logging
 import os
 import time
 import traceback
 from datetime import datetime
+from typing import Optional
 
 import discord
 from discord import app_commands
