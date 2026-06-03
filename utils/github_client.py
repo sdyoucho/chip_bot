@@ -3,6 +3,7 @@ utils/github_client.py
 GitHub API를 활용한 코드 읽기/쓰기/PR 관리.
 """
 
+import asyncio
 import base64
 import logging
 import os
@@ -113,7 +114,6 @@ async def create_branch(branch_name: str, from_branch: Optional[str] = None) -> 
     info = _get_repo_info()
     from_branch = from_branch or info["branch"]
 
-    # 1) 베이스 브랜치의 최신 SHA 조회
     timeout = aiohttp.ClientTimeout(total=15)
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=_headers()) as session:
@@ -124,7 +124,6 @@ async def create_branch(branch_name: str, from_branch: Optional[str] = None) -> 
                 ref_data = await resp.json()
                 base_sha = ref_data["object"]["sha"]
 
-            # 2) 새 브랜치 생성
             create_url = f"{GITHUB_API}/repos/{info['owner']}/{info['repo']}/git/refs"
             payload = {
                 "ref": f"refs/heads/{branch_name}",
@@ -152,9 +151,7 @@ async def commit_file(
     commit_message: str,
     existing_sha: Optional[str] = None,
 ) -> dict:
-    """
-    파일 commit. existing_sha 있으면 update, 없으면 create.
-    """
+    """파일 commit. existing_sha 있으면 update, 없으면 create."""
     info = _get_repo_info()
 
     url = f"{GITHUB_API}/repos/{info['owner']}/{info['repo']}/contents/{path}"
@@ -225,33 +222,235 @@ async def create_pull_request(
 
 
 # ═══════════════════════════════════════════════════════════════════
+# PR 상태 조회 (머지 전 사전 점검용)
+# ═══════════════════════════════════════════════════════════════════
+
+async def get_pull_request(pr_number: int) -> dict:
+    """
+    PR 정보 조회. 머지 가능 여부 사전 확인용.
+
+    Returns:
+        {
+            "success": bool,
+            "state": str,                # "open" | "closed"
+            "merged": bool,
+            "mergeable": bool | None,    # None이면 GitHub가 계산 중
+            "mergeable_state": str,      # "clean" | "dirty" | "blocked" | "unstable" | "unknown"
+            "head_sha": str,
+            "title": str,
+            "html_url": str,
+            "error": str | None,
+            "status_code": int,
+        }
+    """
+    info = _get_repo_info()
+    url = f"{GITHUB_API}/repos/{info['owner']}/{info['repo']}/pulls/{pr_number}"
+
+    result: dict = {
+        "success": False,
+        "state": "",
+        "merged": False,
+        "mergeable": None,
+        "mergeable_state": "unknown",
+        "head_sha": "",
+        "title": "",
+        "html_url": "",
+        "error": None,
+        "status_code": 0,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_headers()) as session:
+            async with session.get(url) as resp:
+                result["status_code"] = resp.status
+                if resp.status == 404:
+                    result["error"] = f"PR #{pr_number}을 찾을 수 없음"
+                    return result
+                if resp.status in (401, 403):
+                    result["error"] = f"권한 부족 (HTTP {resp.status}) — 토큰 스코프 확인 필요"
+                    return result
+                if resp.status != 200:
+                    err_text = await resp.text()
+                    result["error"] = f"PR 조회 실패: HTTP {resp.status} - {err_text[:200]}"
+                    return result
+
+                try:
+                    data = await resp.json()
+                except Exception:
+                    raw = await resp.text()
+                    result["error"] = f"JSON 파싱 실패: {raw[:200]}"
+                    return result
+
+                result["success"] = True
+                result["state"] = data.get("state", "")
+                result["merged"] = data.get("merged", False)
+                result["mergeable"] = data.get("mergeable")  # None 가능
+                result["mergeable_state"] = data.get("mergeable_state", "unknown")
+                result["head_sha"] = (data.get("head") or {}).get("sha", "")
+                result["title"] = data.get("title", "")
+                result["html_url"] = data.get("html_url", "")
+                return result
+    except asyncio.TimeoutError:
+        result["error"] = "GitHub API 타임아웃"
+        return result
+    except aiohttp.ClientError as e:
+        result["error"] = f"네트워크 오류: {e}"
+        return result
+    except Exception as e:
+        result["error"] = f"예외: {e}"
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════════
 # PR 자동 머지
 # ═══════════════════════════════════════════════════════════════════
 
-async def merge_pr(pr_number: int, merge_method: str = "squash") -> dict:
-    """PR 자동 머지."""
+async def merge_pr(
+    pr_number: int,
+    merge_method: str = "squash",
+    precheck: bool = True,
+) -> dict:
+    """
+    PR 자동 머지.
+
+    Args:
+        pr_number: PR 번호
+        merge_method: "merge" | "squash" | "rebase"
+        precheck: True면 머지 전 PR 상태(mergeable/mergeable_state) 사전 확인
+
+    Returns:
+        {
+            "success": bool,         # API 호출+머지 성공 여부
+            "merged": bool,          # 실제 머지되었는지
+            "message": str,          # 사람이 읽을 메시지
+            "sha": str | None,       # 머지 커밋 SHA
+            "status_code": int,      # HTTP 상태 코드 (0이면 네트워크 오류)
+        }
+    """
+    result: dict = {
+        "success": False,
+        "merged": False,
+        "message": "",
+        "sha": None,
+        "status_code": 0,
+    }
+
+    if merge_method not in ("merge", "squash", "rebase"):
+        result["message"] = f"잘못된 merge_method: {merge_method}"
+        return result
+
+    # ── 사전 점검 ──────────────────────────────────────────────
+    if precheck:
+        pre = await get_pull_request(pr_number)
+        if not pre["success"]:
+            result["status_code"] = pre.get("status_code", 0)
+            result["message"] = f"PR 사전조회 실패: {pre.get('error', '알 수 없음')}"
+            return result
+
+        if pre["merged"]:
+            result["success"] = True
+            result["merged"] = True
+            result["message"] = "이미 머지된 PR입니다"
+            result["sha"] = pre.get("head_sha") or None
+            result["status_code"] = 200
+            return result
+
+        if pre["state"] != "open":
+            result["message"] = f"PR이 열려있지 않음 (state={pre['state']})"
+            return result
+
+        ms = pre["mergeable_state"]
+        # GitHub가 mergeable 계산 중이면 mergeable=None → 그대로 시도
+        if pre["mergeable"] is False:
+            result["message"] = (
+                f"머지 불가 (mergeable=False, state={ms}) — "
+                "충돌이나 보호 규칙을 확인하세요"
+            )
+            return result
+        if ms in ("dirty",):
+            result["message"] = "머지 불가: 충돌(dirty)이 있습니다"
+            return result
+        if ms in ("blocked",):
+            log.warning(f"PR #{pr_number}: mergeable_state=blocked (보호규칙) — 시도는 진행")
+
+    # ── 실제 머지 호출 ─────────────────────────────────────────
     info = _get_repo_info()
     url = f"{GITHUB_API}/repos/{info['owner']}/{info['repo']}/pulls/{pr_number}/merge"
-
-    payload = {
-        "merge_method": merge_method,  # "merge", "squash", "rebase"
-    }
+    payload = {"merge_method": merge_method}
 
     timeout = aiohttp.ClientTimeout(total=30)
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=_headers()) as session:
             async with session.put(url, json=payload) as resp:
-                if resp.status != 200:
-                    err_text = await resp.text()
-                    return {"success": False, "error": f"머지 실패: HTTP {resp.status} - {err_text[:200]}"}
-                data = await resp.json()
-                return {
-                    "success": True,
-                    "merged": data.get("merged", False),
-                    "sha": data.get("sha", ""),
-                }
+                result["status_code"] = resp.status
+
+                # JSON 파싱 (실패시 raw text)
+                try:
+                    data = await resp.json(content_type=None)
+                    if not isinstance(data, dict):
+                        data = {"_raw": data}
+                except Exception:
+                    raw = await resp.text()
+                    data = {"_raw": raw}
+
+                api_msg = data.get("message", "") if isinstance(data, dict) else ""
+
+                if resp.status == 200:
+                    result["success"] = True
+                    result["merged"] = bool(data.get("merged", True))
+                    result["sha"] = data.get("sha")
+                    result["message"] = data.get("message") or "머지 성공"
+                    return result
+
+                if resp.status == 405:
+                    result["message"] = (
+                        f"머지 불가 (405 Method Not Allowed): "
+                        f"충돌·체크 실패·보호 규칙 — {api_msg or '상세없음'}"
+                    )
+                    return result
+
+                if resp.status == 409:
+                    result["message"] = (
+                        f"SHA 불일치 (409 Conflict): "
+                        f"PR이 업데이트되었습니다 — {api_msg or '상세없음'}"
+                    )
+                    return result
+
+                if resp.status in (401, 403):
+                    result["message"] = (
+                        f"권한 부족 (HTTP {resp.status}): "
+                        f"GITHUB_TOKEN의 'repo' 스코프와 push 권한을 확인하세요 — {api_msg or ''}"
+                    )
+                    return result
+
+                if resp.status == 404:
+                    result["message"] = f"PR #{pr_number}을 찾을 수 없음"
+                    return result
+
+                if resp.status == 422:
+                    result["message"] = (
+                        f"유효성 실패 (422): merge_method/SHA 확인 — {api_msg or ''}"
+                    )
+                    return result
+
+                # 기타
+                raw_preview = ""
+                if isinstance(data, dict):
+                    raw_preview = str(data.get("_raw", "") or api_msg)[:200]
+                result["message"] = f"머지 실패: HTTP {resp.status} - {raw_preview}"
+                return result
+
+    except asyncio.TimeoutError:
+        result["message"] = "GitHub 머지 API 타임아웃"
+        return result
+    except aiohttp.ClientError as e:
+        result["message"] = f"네트워크 오류: {e}"
+        return result
     except Exception as e:
-        return {"success": False, "error": f"네트워크 오류: {e}"}
+        log.exception(f"merge_pr 예외 (PR #{pr_number})")
+        result["message"] = f"예외: {e}"
+        return result
 
 
 def generate_branch_name(prefix: str = "gicho/auto") -> str:
@@ -284,7 +483,7 @@ async def diagnose_github_access() -> dict:
             "recommendations": list[str], # 권장사항
         }
     """
-    result = {
+    result: dict = {
         "token_set": False,
         "token_preview": "",
         "token_valid": False,
@@ -321,7 +520,6 @@ async def diagnose_github_access() -> dict:
     timeout = aiohttp.ClientTimeout(total=10)
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=_headers()) as session:
-            # /user 호출 (인증 필수)
             async with session.get(f"{GITHUB_API}/user") as resp:
                 if resp.status == 401:
                     result["issues"].append("❌ 토큰이 유효하지 않음 (401 Unauthorized)")
@@ -329,13 +527,11 @@ async def diagnose_github_access() -> dict:
                         "GitHub Settings → Developer settings → "
                         "Personal access tokens에서 새 토큰 발급"
                     )
-                    # rate limit은 익명으로도 확인 가능하니 계속 진행
                 elif resp.status == 200:
                     user_data = await resp.json()
                     result["token_valid"] = True
                     result["user_login"] = user_data.get("login", "unknown")
 
-                    # 토큰 스코프 추출
                     scopes_header = resp.headers.get("X-OAuth-Scopes", "")
                     if scopes_header:
                         result["scopes"] = [s.strip() for s in scopes_header.split(",") if s.strip()]
@@ -374,7 +570,6 @@ async def diagnose_github_access() -> dict:
 
     # 5) 권한 분석
     if result["token_valid"]:
-        # 필요 스코프: 'repo' (private) 또는 'public_repo' (public only)
         needed = {"repo", "public_repo"}
         has_any = bool(set(result["scopes"]) & needed)
 
@@ -391,7 +586,6 @@ async def diagnose_github_access() -> dict:
                 "새 토큰 발급 시 'repo' 스코프 체크 필수"
             )
 
-        # 레포 권한 확인
         perms = result["repo_permissions"]
         if perms and not perms.get("push", False):
             result["issues"].append(
@@ -409,11 +603,7 @@ async def diagnose_github_access() -> dict:
         )
     elif result["rate_limit_max"] == 60:
         result["issues"].append(
-            "⚠️ Rate limit이 60 (익명 수준) — 토큰이 헤더에 실리지 않은 듯"
+            "⚠️ Rate limit이 60/h (익명 호출) — 토큰 인증 실패 가능성"
         )
 
     return result
-
-
-# asyncio import 추가 (파일 상단에 이미 없다면)
-import asyncio
