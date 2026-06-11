@@ -11,6 +11,10 @@ OpenRouter 기반 라우팅 엔진 (gpt-5.4-nano 사용).
 🆕 v3 변경:
 - rnd_health 명령 인자 파싱: 단일 토큰 → '나머지 전체 문자열'
 - 인자가 비어있으면 사용법 안내 메시지 반환
+
+🆕 v4 변경:
+- log_raw_channel_id 영속화: persistent_store 기반 getter/setter 사용
+- 모듈 전역 캐시는 유지하되, 초기 로드/쓰기 시 persistent_store와 동기화
 """
 
 import json
@@ -18,6 +22,10 @@ import logging
 import re
 
 from utils.openrouter_client import chat
+from utils.persistent_store import (
+    get_log_raw_channel_id as _ps_get_log_raw_channel_id,
+    set_log_raw_channel_id as _ps_set_log_raw_channel_id,
+)
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +68,56 @@ URL 처리 가이드:
 4. 확실하지 않으면 modules=[{"name":"haecho"}], needs_haecho_summary=true
 
 JSON만 출력."""
+
+
+# ═══════════════════════════════════════════════════════════════════
+# log_raw_channel_id 영속화 캐시 (persistent_store 연동)
+# ═══════════════════════════════════════════════════════════════════
+
+# 모듈 전역 캐시 — persistent_store 와 동기화됨.
+# 직접 접근 대신 get_log_raw_channel_id() / set_log_raw_channel_id() 사용 권장.
+_log_raw_channel_id_cache: int | None = None
+
+
+def _load_log_raw_channel_id_from_store() -> int | None:
+    """persistent_store 에서 log_raw_channel_id 를 읽어 캐시에 반영."""
+    global _log_raw_channel_id_cache
+    try:
+        _log_raw_channel_id_cache = _ps_get_log_raw_channel_id()
+    except Exception as e:
+        log.warning(f"log_raw_channel_id 영속 로드 실패: {e}")
+        _log_raw_channel_id_cache = None
+    return _log_raw_channel_id_cache
+
+
+# 모듈 import 시 1회 로드
+_load_log_raw_channel_id_from_store()
+
+
+def get_log_raw_channel_id() -> int | None:
+    """
+    현재 설정된 log_raw_channel_id 를 반환한다.
+    캐시가 없으면 persistent_store 에서 재로드.
+    """
+    global _log_raw_channel_id_cache
+    if _log_raw_channel_id_cache is None:
+        _load_log_raw_channel_id_from_store()
+    return _log_raw_channel_id_cache
+
+
+def set_log_raw_channel_id(channel_id: int | None) -> None:
+    """
+    log_raw_channel_id 를 영속 저장(persistent_store) + 캐시 갱신.
+
+    Args:
+        channel_id: Discord 채널 ID. None 이면 설정 해제.
+    """
+    global _log_raw_channel_id_cache
+    try:
+        _ps_set_log_raw_channel_id(channel_id)
+    except Exception as e:
+        log.error(f"log_raw_channel_id 영속 저장 실패: {e}")
+    _log_raw_channel_id_cache = channel_id
 
 
 # ═══════════════════════════════════════════════════════════════════
