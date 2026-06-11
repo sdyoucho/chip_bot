@@ -1929,6 +1929,114 @@ async def setup_commands(bot: commands.Bot):
             await _send_error(interaction, error_title="조회 오류", error=e)
 
     # ───────────────────────────────────────────────────────────
+    # 긴급 디버깅용
+    # ───────────────────────────────────────────────────────────
+        
+    @bot.tree.command(
+        name="file_check",
+        description="배포된 파일 상태 진단 (긴급 디버깅용)",
+    )
+    @is_cho()
+    @app_commands.describe(path="확인할 파일 경로 (기본: modules/rnd.py)")
+    async def cmd_file_check(
+        interaction: discord.Interaction,
+        path: str = "modules/rnd.py",
+    ):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        try:
+            from pathlib import Path
+            import hashlib
+            import py_compile
+            import os
+
+            p = Path(path)
+            if not p.exists():
+                embed = embed_error("파일 없음", f"`{path}` 존재하지 않음")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
+            # 파일 정보 수집
+            content = p.read_text(encoding="utf-8", errors="replace")
+            line_count = len(content.splitlines())
+            byte_size = p.stat().st_size
+            md5 = hashlib.md5(content.encode("utf-8")).hexdigest()[:16]
+            mtime = datetime.fromtimestamp(p.stat().st_mtime)
+
+            # syntax check
+            syntax_ok = "✅ 정상"
+            syntax_err = ""
+            try:
+                py_compile.compile(str(p), doraise=True)
+            except py_compile.PyCompileError as e:
+                syntax_ok = "❌ 오류"
+                syntax_err = str(e)[:500]
+            except SyntaxError as e:
+                syntax_ok = "❌ 오류"
+                syntax_err = f"Line {e.lineno}: {e.msg}"
+
+            # 처음/마지막 5줄
+            lines = content.splitlines()
+            first_lines = "\n".join(lines[:5])[:500]
+            last_lines = "\n".join(lines[-10:])[:1000]
+
+            # __pycache__ 확인
+            pycache_dir = p.parent / "__pycache__"
+            pyc_files = []
+            if pycache_dir.exists():
+                pyc_files = [
+                    f"{f.name} ({f.stat().st_size} bytes)"
+                    for f in pycache_dir.glob(f"{p.stem}.*.pyc")
+                ]
+
+            embed = discord.Embed(
+                title=f"🔍 파일 진단 — `{path}`",
+                color=0x059669 if syntax_ok == "✅ 정상" else 0xE11D48,
+            )
+            embed.add_field(name="📊 파일 정보", value=(
+                f"**라인 수**: {line_count:,}\n"
+                f"**바이트**: {byte_size:,}\n"
+                f"**MD5**: `{md5}`\n"
+                f"**수정 시각**: {mtime:%Y-%m-%d %H:%M:%S}\n"
+                f"**Syntax**: {syntax_ok}"
+            ), inline=False)
+
+            if syntax_err:
+                embed.add_field(
+                    name="❌ Syntax 오류",
+                    value=f"```\n{syntax_err}\n```"[:1024],
+                    inline=False,
+                )
+
+            embed.add_field(
+                name="📝 처음 5줄",
+                value=f"```python\n{first_lines}\n```"[:1024],
+                inline=False,
+            )
+            embed.add_field(
+                name="📝 마지막 10줄",
+                value=f"```python\n{last_lines}\n```"[:1024],
+                inline=False,
+            )
+
+            if pyc_files:
+                embed.add_field(
+                    name="🗂️ __pycache__",
+                    value="\n".join(f"• `{f}`" for f in pyc_files)[:1024],
+                    inline=False,
+                )
+
+            # 환경 정보
+            embed.set_footer(
+                text=f"CWD: {os.getcwd()} · Python: {os.sys.version.split()[0]}",
+            )
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            await _send_error(interaction, error_title="파일 진단 오류", error=e)
+    
+    
+    # ───────────────────────────────────────────────────────────
     # /help — 페이지네이션
     # ───────────────────────────────────────────────────────────
     @bot.tree.command(name="help", description="명령어 도움말 (페이지별)")
