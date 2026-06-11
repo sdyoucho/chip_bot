@@ -76,6 +76,9 @@ _CODE_EXTENSIONS = {
 # 파일 읽기 최대 크기 (50KB) — 너무 큰 파일은 자르기
 _MAX_FILE_BYTES: int = 50 * 1024
 
+# AI 코드 리뷰 응답 최대 토큰 (충분히 크게 — 사실상 제한 해제 목적)
+_REVIEW_MAX_TOKENS: int = 16000
+
 
 # ── 1. 기본 Q&A ─────────────────────────────────────────────────────
 async def handle_query(query: str) -> discord.Embed:
