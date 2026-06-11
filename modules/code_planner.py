@@ -422,74 +422,273 @@ async def generate_code_for_session(session_id: str) -> dict:
     }
 
 
-async def _generate_single_file(file_spec: dict, session: dict) -> dict:
-    """파일 한 개의 코드 생성."""
-    path = file_spec["path"]
-    action = file_spec.get("action", "modify")
-    instruction = file_spec.get("instruction", "")
+async def _generate_single_file(
+    session_id: str,
+    file_plan: dict,
+    user_request: str,
+) -> dict:
+    """단일 파일에 대한 코드 생성."""
+    path = file_plan.get("path", "")
+    action = file_plan.get("action", "modify")
+    instruction = file_plan.get("instruction", "")
 
-    # 기존 파일 내용 가져오기 (modify인 경우)
-    old_content = ""
-    file_sha = ""
+    log.info(f"[{session_id}] 코드 생성 시작: {path} ({action})")
+
+    if not path or not instruction:
+        return {
+            "success": False,
+            "path": path,
+            "error": "path 또는 instruction 누락",
+        }
+
+    # 기존 파일 내용 읽기 (modify인 경우)
+    existing_content = ""
     if action == "modify":
-        from utils.github_client import get_file_content
-        file_result = await get_file_content(path)
-        if file_result["success"]:
-            old_content = file_result["content"]
-            file_sha = file_result["sha"]
-        else:
-            # 파일 없으면 create로 전환
+        try:
+            from utils.github_client import get_file_content
+            file_info = await get_file_content(path)
+            if file_info.get("success"):
+                existing_content = file_info.get("content", "")
+                log.info(
+                    f"[{session_id}] 기존 파일 로드: {path} "
+                    f"({len(existing_content):,}자)"
+                )
+            else:
+                log.warning(
+                    f"[{session_id}] 기존 파일 로드 실패: {path} "
+                    f"({file_info.get('error', '?')})"
+                )
+                # 파일이 없으면 create로 전환
+                action = "create"
+        except Exception as e:
+            log.warning(f"[{session_id}] 파일 읽기 예외 ({path}): {e}")
             action = "create"
 
-    # 컨텍스트 구성
-    context = (
-        f"=== 전체 요청 ===\n{session['user_request']}\n\n"
-        f"=== 전체 계획 요약 ===\n{session['plan'].get('plan_summary', '')}\n\n"
-        f"=== 이 파일 작업 ===\n"
-        f"경로: {path}\n"
-        f"동작: {action}\n"
-        f"목적: {file_spec.get('purpose', '')}\n"
-        f"지시: {instruction}\n"
-    )
+    # 프롬프트 구성
+    BACKTICKS_3 = "```"
 
-    if action == "modify" and old_content:
-        context += f"\n=== 현재 파일 내용 ===\n{old_content[:15000]}\n"
+    if action == "modify":
+        prompt_parts = [
+            "다음 파일을 수정해주세요.",
+            "",
+            "**경로**: " + path,
+            "**요청**: " + user_request[:1000],
+            "**지시사항**: " + instruction[:2000],
+            "",
+            "**현재 파일 내용**:",
+            BACKTICKS_3 + "python",
+            existing_content[:30000],
+            BACKTICKS_3,
+            "",
+            "위 파일에 대한 **수정된 전체 코드**를 반환해주세요.",
+            "반드시 다음 규칙을 따르세요:",
+            "1. " + BACKTICKS_3 + "python ... " + BACKTICKS_3 + " 코드 블록 안에 전체 파일 내용을 작성",
+            "2. import 누락 없도록 (typing.Optional, json 등 필요한 것 모두 import)",
+            "3. 기존 기능을 모두 유지하며 요청만 반영",
+            "4. syntax 오류 없이 컴파일 가능한 코드",
+            "5. f-string 안에 백틱 3개 사용 금지 (변수로 분리)",
+        ]
+    else:  # create
+        prompt_parts = [
+            "다음 파일을 새로 생성해주세요.",
+            "",
+            "**경로**: " + path,
+            "**요청**: " + user_request[:1000],
+            "**지시사항**: " + instruction[:2000],
+            "",
+            "다음 규칙에 따라 새 파일을 생성해주세요:",
+            "1. " + BACKTICKS_3 + "python ... " + BACKTICKS_3 + " 코드 블록 안에 전체 내용 작성",
+            "2. 모든 필요한 import 포함",
+            "3. syntax 오류 없이 컴파일 가능",
+            "4. docstring 포함",
+            "5. f-string 안에 백틱 3개 사용 금지",
+        ]
 
+    user_prompt = "\n".join(prompt_parts)
+
+    # AI 호출
     try:
+        from utils.openrouter_client import chat
+
         result = await chat(
             messages=[
                 {"role": "system", "content": CODE_GENERATOR_SYSTEM},
-                {"role": "user", "content": context},
+                {"role": "user", "content": user_prompt},
             ],
             agent="gaechyo",
             tier="premium",
-            max_tokens=12000,
-            temperature=0.3,
+            max_tokens=16000,
+            temperature=0.2,
         )
-        ai_response = result["content"]
+
+        ai_response = result.get("content", "") or ""
+        cost = float(result.get("cost", 0.0))
+
+        log.info(
+            f"[{session_id}] AI 응답: {len(ai_response):,}자, "
+            f"비용 ${cost:.5f}"
+        )
+
+        if not ai_response.strip():
+            return {
+                "success": False,
+                "path": path,
+                "error": "AI 응답이 비어있음",
+                "cost": cost,
+            }
+
+        # 코드 블록 추출
+        new_content = _extract_code_block(ai_response)
+
+        if not new_content:
+            log.warning(
+                f"[{session_id}] 코드 블록 추출 실패. AI 응답 처음 500자:\n"
+                f"{ai_response[:500]}"
+            )
+            return {
+                "success": False,
+                "path": path,
+                "error": (
+                    "AI 응답에서 코드 블록을 찾을 수 없음. "
+                    "응답 처음 500자: " + ai_response[:500]
+                ),
+                "cost": cost,
+            }
+
+        log.info(
+            f"[{session_id}] 코드 블록 추출 성공: {path} "
+            f"({len(new_content):,}자)"
+        )
+
+        # syntax 검증 (Python 파일만)
+        if path.endswith(".py"):
+            try:
+                compile(new_content, path, "exec")
+                log.info(f"[{session_id}] Syntax 검증 통과: {path}")
+            except SyntaxError as e:
+                log.error(
+                    f"[{session_id}] AI 생성 코드 syntax 오류: {path} — "
+                    f"Line {e.lineno}: {e.msg}"
+                )
+                return {
+                    "success": False,
+                    "path": path,
+                    "error": (
+                        "AI 생성 코드 syntax 오류 (Line " + str(e.lineno) +
+                        "): " + str(e.msg)
+                    ),
+                    "cost": cost,
+                    "new_content": new_content,  # 디버깅용 보존
+                }
+
+        # diff 생성
+        diff_text = _make_diff(existing_content, new_content, path)
+        lines_changed = len(diff_text.splitlines())
+
+        # summary 추출 (AI 응답의 코드 블록 외 텍스트)
+        summary = _extract_summary(ai_response)
+
+        return {
+            "success": True,
+            "path": path,
+            "action": action,
+            "new_content": new_content,
+            "diff": diff_text,
+            "lines_changed": lines_changed,
+            "summary": summary,
+            "cost": cost,
+        }
+
     except Exception as e:
-        return {"success": False, "path": path, "error": f"AI 생성 실패: {e}"}
+        log.exception(f"[{session_id}] 코드 생성 예외 ({path}): {e}")
+        return {
+            "success": False,
+            "path": path,
+            "error": "예외: " + str(e),
+            "cost": 0.0,
+        }
 
-    # 코드 블록 추출
-    new_content = _extract_code_block(ai_response)
-    if not new_content:
-        return {"success": False, "path": path, "error": "코드 블록 추출 실패"}
 
-    # Diff 계산
-    diff = _calculate_diff(old_content, new_content, path)
+def _extract_code_block(text: str) -> str:
+    """
+    AI 응답에서 코드 블록 추출.
+    여러 패턴 지원:
+    - ```python ... ```
+    - ```py ... ```
+    - ``` ... ```
+    """
+    import re
 
-    return {
-        "success": True,
-        "path": path,
-        "action": action,
-        "old_content": old_content,
-        "new_content": new_content,
-        "file_sha": file_sha,
-        "diff": diff,
-        "summary": _extract_summary(ai_response),
-        "lines_changed": _count_changed_lines(diff) if old_content else len(new_content.splitlines()),
-        "cost": result.get("cost", 0),
-    }
+    if not text:
+        return ""
+
+    # 패턴 1: ```python ... ``` (가장 우선)
+    patterns = [
+        r"```python\s*\n(.*?)```",
+        r"```py\s*\n(.*?)```",
+        r"```\s*\n(.*?)```",
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        if matches:
+            # 가장 긴 매치 선택 (보통 메인 코드가 가장 김)
+            return max(matches, key=len).strip()
+
+    # 패턴 매치 실패 시: 첫 ```부터 마지막 ```까지
+    first_idx = text.find("```")
+    if first_idx != -1:
+        # 첫 ``` 다음 줄부터 시작
+        start = text.find("\n", first_idx) + 1
+        last_idx = text.rfind("```")
+        if last_idx > start:
+            extracted = text[start:last_idx].strip()
+            if extracted:
+                return extracted
+
+    # 코드 블록 마커가 전혀 없으면 — AI가 코드만 반환했을 가능성
+    # import나 def, class로 시작하면 코드로 간주
+    lines = text.strip().splitlines()
+    if lines:
+        first_line = lines[0].strip()
+        if first_line.startswith(("import ", "from ", "def ", "class ", "#", '"""')):
+            return text.strip()
+
+    return ""
+
+
+def _extract_summary(text: str) -> str:
+    """AI 응답에서 코드 블록 외 텍스트(설명) 추출."""
+    import re
+
+    if not text:
+        return ""
+
+    # 모든 코드 블록 제거
+    cleaned = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    cleaned = cleaned.strip()
+
+    # 처음 500자만 요약으로 사용
+    return cleaned[:500] if cleaned else "(설명 없음)"
+
+
+def _make_diff(old: str, new: str, path: str) -> str:
+    """unified diff 생성."""
+    import difflib
+
+    old_lines = old.splitlines(keepends=True) if old else []
+    new_lines = new.splitlines(keepends=True) if new else []
+
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=path + " (before)",
+        tofile=path + " (after)",
+        lineterm="",
+        n=3,
+    )
+
+    return "".join(diff)
 
 
 # ═══════════════════════════════════════════════════════════════════
