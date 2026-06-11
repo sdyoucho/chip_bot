@@ -11,7 +11,7 @@ import json
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # 영속 데이터 저장 루트 디렉토리
 _BASE_DIR: Path = Path("data") / "persistent"
@@ -23,6 +23,10 @@ _locks: Dict[str, threading.Lock] = {}
 
 # 메모리 캐시 (디스크 IO 최소화)
 _cache: Dict[str, Dict[str, Any]] = {}
+
+# log_raw_channel_id 전용 namespace/key
+_LOG_RAW_NS: str = "log_channel"
+_LOG_RAW_KEY: str = "log_raw_channel_id"
 
 
 def _get_lock(namespace: str) -> threading.Lock:
@@ -123,3 +127,57 @@ def set(namespace: str, key: str, value: Any) -> None:  # noqa: A001 (의도적 
         current = load(namespace)
     current[key] = value
     save(namespace, current)
+
+
+def get_all() -> Dict[str, Dict[str, Any]]:
+    """모든 namespace의 영속 데이터를 dict로 반환.
+
+    저장 디렉토리를 스캔해 발견된 모든 ``*.json`` 파일을 로드한다.
+    캐시에만 존재하고 디스크에 없는 namespace도 포함된다.
+
+    Returns:
+        ``{namespace: {key: value, ...}, ...}`` 형태의 dict.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+
+    # 디스크상의 모든 namespace 스캔
+    try:
+        for path in _BASE_DIR.glob("*.json"):
+            namespace = path.stem
+            try:
+                result[namespace] = load(namespace)
+            except Exception:
+                # 개별 namespace 로드 실패는 건너뜀
+                result[namespace] = {}
+    except OSError:
+        # 디렉토리 접근 실패 시 캐시 기반으로만 반환
+        pass
+
+    # 캐시에만 존재하는 namespace도 포함
+    with _locks_guard:
+        cached_namespaces = list(_cache.keys())
+    for ns in cached_namespaces:
+        if ns not in result:
+            result[ns] = dict(_cache.get(ns) or {})
+
+    return result
+
+
+def set_log_raw_channel_id(channel_id: Optional[int]) -> None:
+    """원시 로그 채널 ID를 영속 저장.
+
+    Args:
+        channel_id: 디스코드 채널 ID. ``None``인 경우도 그대로 저장한다.
+    """
+    set(_LOG_RAW_NS, _LOG_RAW_KEY, channel_id)
+
+
+def get_log_raw_channel_id() -> Optional[int]:
+    """저장된 원시 로그 채널 ID 반환 (없으면 None)."""
+    value = get(_LOG_RAW_NS, _LOG_RAW_KEY, None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
