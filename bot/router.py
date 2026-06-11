@@ -7,6 +7,10 @@ OpenRouter 기반 라우팅 엔진 (gpt-5.4-nano 사용).
 - URL 자동 추출 + 라우팅 힌트
 - GitHub 링크 특수 처리
 - max_tokens 증가 (300 → 500)
+
+🆕 v3 변경:
+- rnd_health 명령 인자 파싱: 단일 토큰 → '나머지 전체 문자열'
+- 인자가 비어있으면 사용법 안내 메시지 반환
 """
 
 import json
@@ -114,6 +118,43 @@ def _categorize_url(url: str) -> tuple[str, str, str] | None:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# 명령어 인자 파싱 (rnd_health 등)
+# ═══════════════════════════════════════════════════════════════════
+
+RND_HEALTH_USAGE: str = (
+    "ℹ️ 사용법: `rnd_health <파일경로 또는 리뷰 요청 문장>`\n"
+    "예) `rnd_health bot/router.py`\n"
+    "예) `rnd_health modules/rnd.py 의 예외처리가 안전한지 봐줘`"
+)
+
+
+def parse_rnd_health_args(args: list[str] | str) -> tuple[bool, str]:
+    """
+    rnd_health 명령의 인자를 파싱한다.
+
+    기존: split 후 첫 토큰만 사용 → 자유 문장/공백 포함 경로 처리 불가
+    변경: 나머지 전체 문자열을 그대로 전달 (코드리뷰 요청 문장 지원)
+
+    Args:
+        args: 명령 인자. list[str] 또는 단일 str 모두 허용.
+
+    Returns:
+        (ok, payload_or_message)
+        - ok=True : payload는 사용자가 넘긴 '나머지 전체 문자열' (strip)
+        - ok=False: payload는 사용법 안내 메시지
+    """
+    if isinstance(args, str):
+        joined = args.strip()
+    else:
+        joined = " ".join(a for a in args if a is not None).strip()
+
+    if not joined:
+        return False, RND_HEALTH_USAGE
+
+    return True, joined
+
+
+# ═══════════════════════════════════════════════════════════════════
 # 메인 라우팅
 # ═══════════════════════════════════════════════════════════════════
 
@@ -129,8 +170,8 @@ async def route(user_input: str) -> dict:
     }
     """
     # 1) URL 추출
-    extracted_urls = []
-    url_categories = {}
+    extracted_urls: list[str] = []
+    url_categories: dict[str, str] = {}
     try:
         from utils.url_analyzer import extract_urls
         extracted_urls = extract_urls(user_input)
@@ -143,7 +184,7 @@ async def route(user_input: str) -> dict:
         log.debug("url_analyzer 미설치 — URL 추출 건너뜀")
 
     # 2) LLM 라우팅
-    routing_result = None
+    routing_result: dict | None = None
     try:
         result = await chat(
             messages=[
@@ -204,7 +245,7 @@ def _enrich_routing_with_urls(
     existing_modules = {m["name"] for m in routing["modules"]}
 
     # 각 URL 카테고리에 맞는 모듈 추가
-    added_modules = []
+    added_modules: list[dict] = []
     for url, category in url_categories.items():
         cat_info = URL_CATEGORIES.get(category)
         if not cat_info:
@@ -256,7 +297,7 @@ def _fallback_route(text: str) -> dict:
         (["디자인", "포스터", "ppt", "figma"], "design"),
         (["전체", "총괄", "브리핑", "종합"], "haecho"),
     ]
-    matched = []
+    matched: list[dict] = []
     for i, (keywords, module) in enumerate(rules):
         if any(k in text_lower for k in keywords):
             matched.append({"name": module, "priority": i + 1, "reason": "키워드 폴백"})

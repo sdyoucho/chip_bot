@@ -3,23 +3,19 @@ modules/rnd.py
 개쵸 — R&D 총괄.
 
 역할:
-1. Q&A: 기술 질문 응답 (기존 기능)
-2. 자가 진단: 봇 건강 상태 체크 (/rnd_health)
-3. 코드 리뷰: 로그·오류 분석 (/rnd_diagnose)
-4. 업데이트 공지: R&D 채널에 업데이트 현황 자동 게시
-5. 신규 봇 설계: Claude Opus로 신규 봇 스펙 초안 생성
+1. Q&A: 기술 질문 응답
+2. 코드 리뷰: rnd_health (리뉴얼) — 코드 파일 또는 자유 문장 입력 → AI 코드 리뷰 결과 반환
+3. 로그/이슈 진단: rnd_diagnose
+4. 신규 봇 설계: design_new_bot
+5. 업데이트 공지: R&D 채널에 업데이트 현황 자동 게시 (외부 모듈에서 호출)
 
-OpenRouter: standard 티어 (Claude Opus 4.7)
+OpenRouter: standard 티어 (Claude Opus 등)
 """
 
-import asyncio
 import logging
 import os
-import platform
-import sys
-import time
-from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import discord
 
@@ -27,6 +23,7 @@ from utils.openrouter_client import chat
 
 log = logging.getLogger(__name__)
 
+# ── 시스템 프롬프트 ─────────────────────────────────────────────────
 SYSTEM_QA = (
     "당신은 '개쵸'입니다. Python·Discord.py·Notion API·YouTube API·"
     "스트리밍 플랫폼 연동·Railway 배포·OpenRouter에 특화된 시니어 개발자입니다. "
@@ -48,10 +45,36 @@ SYSTEM_BOT_DESIGN = (
     "한국어로 작성하고, 실행 가능한 수준의 구체적 스펙으로 작성하세요."
 )
 
+SYSTEM_CODE_REVIEW = (
+    "당신은 '개쵸'입니다. 시니어 코드 리뷰어로서 Python/Discord.py 코드 또는 "
+    "사용자가 제시한 코드 관련 문장을 분석합니다.\n"
+    "반드시 다음 4가지 항목으로 마크다운 형식의 한국어 리뷰를 작성하세요:\n\n"
+    "### 1. 문법/런타임 위험\n"
+    "- 잠재적 예외, 타입 오류, None 처리 누락, 비동기 오용 등\n\n"
+    "### 2. 스타일/가독성\n"
+    "- PEP8, 네이밍, 함수 분리, 주석/docstring, 중복 코드\n\n"
+    "### 3. 개선 제안\n"
+    "- 구체적인 리팩토링 방향 (코드 스니펫 포함 가능)\n\n"
+    "### 4. 보안/성능\n"
+    "- 비밀키 노출, 입력 검증, I/O·DB·API 호출 최적화, 메모리/캐시 이슈\n\n"
+    "간결하지만 실무에서 바로 적용 가능한 수준으로 작성하세요. "
+    "문제가 없는 항목은 '특이사항 없음'으로 표기하세요."
+)
+
 # /code_propose 연계 안내 상수
 NEXT_STEP_HINT: str = (
     "다음 단계: `/code_propose` 로 자동 수정 제안을 받을 수 있습니다."
 )
+
+# 코드 리뷰 시 허용 확장자
+_CODE_EXTENSIONS = {
+    ".py", ".pyi", ".js", ".ts", ".tsx", ".jsx",
+    ".json", ".yaml", ".yml", ".toml", ".md",
+    ".sh", ".env", ".cfg", ".ini",
+}
+
+# 파일 읽기 최대 크기 (50KB) — 너무 큰 파일은 자르기
+_MAX_FILE_BYTES: int = 50 * 1024
 
 
 # ── 1. 기본 Q&A ─────────────────────────────────────────────────────
@@ -81,183 +104,111 @@ async def handle_query(query: str) -> discord.Embed:
         return embed_error("R&D 오류", str(e))
 
 
-# ── 2. 봇 건강 상태 체크 ───────────────────────────────────────────
-async def run_health_check(bot: discord.Client) -> discord.Embed:
+# ── 2. 코드 리뷰 (rnd_health 리뉴얼) ────────────────────────────────
+def _looks_like_path(target: str) -> bool:
+    """입력 문자열이 파일 경로처럼 보이는지 휴리스틱 판단."""
+    s = target.strip().strip("`").strip('"').strip("'")
+    if "\n" in s or len(s) > 300:
+        return False
+    if " " in s and not (s.endswith(tuple(_CODE_EXTENSIONS))):
+        return False
+    # 확장자 또는 경로 구분자 존재
+    if any(s.endswith(ext) for ext in _CODE_EXTENSIONS):
+        return True
+    if "/" in s or "\\" in s:
+        return True
+    return False
+
+
+def _read_code_file(path_str: str) -> Optional[tuple[Path, str]]:
     """
-    봇의 현재 상태를 진단.
-    - 가동 시간
-    - 연결된 서버 수
-    - OpenRouter 크레딧
-    - 필수 환경변수
-    - 최근 로그 에러 횟수 (가능하면)
+    경로 문자열을 읽어 (Path, 내용)을 반환. 실패 시 None.
+
+    - 보안: 절대경로 traversal 차단을 위해 현재 작업 디렉터리 내부로 제한.
+    - 크기: _MAX_FILE_BYTES 초과 시 앞부분만 사용.
     """
-    from utils.restart_manager import get_uptime, get_start_time
-    from utils.openrouter_client import get_remaining_credits
-
-    embed = discord.Embed(
-        title="🩺 개쵸 — 봇 건강 진단",
-        color=0x06B6D4,
-        timestamp=datetime.now(),
-    )
-
-    # 기본 정보
-    embed.add_field(
-        name="⏱️ 가동 시간",
-        value=get_uptime(),
-        inline=True,
-    )
-    embed.add_field(
-        name="🌐 연결 서버",
-        value=f"{len(bot.guilds)}개",
-        inline=True,
-    )
-    embed.add_field(
-        name="📡 지연 시간",
-        value=f"{bot.latency * 1000:.0f}ms",
-        inline=True,
-    )
-
-    # 시스템 정보
-    embed.add_field(
-        name="💻 Python",
-        value=platform.python_version(),
-        inline=True,
-    )
-    embed.add_field(
-        name="🖥️ 플랫폼",
-        value=platform.system(),
-        inline=True,
-    )
-
-    # OpenRouter 크레딧
-    credits: dict = {}
+    s = path_str.strip().strip("`").strip('"').strip("'")
     try:
-        credits = await get_remaining_credits()
-        usage_ratio = credits["usage_ratio"]
-        credit_icon = "🟢" if usage_ratio < 0.5 else "🟠" if usage_ratio < 0.9 else "🔴"
-        embed.add_field(
-            name="💰 OpenRouter",
-            value=(
-                f"{credit_icon} 사용 {usage_ratio*100:.1f}%\n"
-                f"잔여 ${credits['remaining']:.3f}"
-            ),
-            inline=True,
-        )
-    except Exception as e:
-        embed.add_field(name="💰 OpenRouter", value=f"❌ {e}", inline=True)
+        p = Path(s).expanduser()
+        if not p.is_absolute():
+            p = (Path.cwd() / p).resolve()
+        else:
+            p = p.resolve()
+    except Exception:
+        return None
 
-    # 필수 환경변수 체크
-    required_vars = [
-        "DISCORD_TOKEN", "OPENROUTER_API_KEY", "CHO_USER_ID",
-        "NOTION_TOKEN", "NOTION_STREAMERS_DB",
-    ]
-    missing = [v for v in required_vars if not os.getenv(v, "").strip()]
-    env_status = "✅ 모두 설정됨" if not missing else f"❌ 누락: {', '.join(missing)}"
-    embed.add_field(name="🔑 환경변수", value=env_status, inline=False)
+    # 작업 디렉터리 또는 /data 하위만 허용
+    cwd = Path.cwd().resolve()
+    allowed_roots = [cwd]
+    data_root = Path("/data")
+    if data_root.exists():
+        allowed_roots.append(data_root.resolve())
 
-    # 데이터 디렉터리 상태
-    data_dir = Path("/data") if Path("/data").exists() else Path("./data")
-    data_status = (
-        f"✅ `{data_dir}` 사용 가능"
-        if data_dir.exists() and os.access(data_dir, os.W_OK)
-        else f"⚠️ `{data_dir}` 쓰기 불가"
-    )
-    embed.add_field(name="💾 데이터 저장소", value=data_status, inline=False)
+    if not any(str(p).startswith(str(root)) for root in allowed_roots):
+        log.warning("코드 리뷰: 허용되지 않은 경로 차단 — %s", p)
+        return None
 
-    # 전반적 진단
-    has_issue = bool(missing) or (credits.get("usage_ratio", 0) >= 0.9 if credits else False)
-    if has_issue:
-        embed.color = 0xF97316
-        embed.description = (
-            "⚠️ **주의 필요** — 아래 항목 확인\n\n" + NEXT_STEP_HINT
-        )
-    else:
-        embed.description = "✅ **정상 작동 중**\n\n" + NEXT_STEP_HINT
+    if not p.exists() or not p.is_file():
+        return None
 
-    # 다음 단계 안내 필드도 별도 추가 (눈에 띄게)
-    embed.add_field(
-        name="➡️ 다음 단계",
-        value=NEXT_STEP_HINT,
-        inline=False,
-    )
-
-    embed.set_footer(text=f"개쵸 자가진단 · {get_start_time():%Y-%m-%d %H:%M} 시작")
-    return embed
-
-
-# ── 3. 로그/이슈 진단 ──────────────────────────────────────────────
-async def diagnose_issue(issue_description: str) -> discord.Embed:
-    """
-    사용자가 설명한 이슈를 Claude Opus로 진단.
-    예: /rnd_diagnose "/ask 커맨드가 응답이 없음"
-    """
-    prompt = f"""다음 이슈에 대한 진단과 해결책을 제시해주세요:
-
-**이슈**: {issue_description}
-
-다음 정보를 포함해 답변:
-1. 가능한 원인 (상위 3개)
-2. 각 원인별 확인 방법
-3. 예상 해결 방법
-4. 예방 조치
-
-시스템 컨텍스트:
-- Python 3.12 / discord.py 2.3.2
-- Railway 배포
-- OpenRouter 통합 (gpt-5.4-nano, claude-opus-4.7)
-- Notion API + APScheduler 사용
-"""
     try:
-        result = await chat(
-            messages=[
-                {"role": "system", "content": SYSTEM_QA},
-                {"role": "user", "content": prompt},
-            ],
-            agent="gaechyo",
-            max_tokens=1800,
-            temperature=0.3,
-        )
-        embed = discord.Embed(
-            title="🔬 개쵸 — 이슈 진단",
-            description=result["content"][:3500],
-            color=0xF97316,
-        )
-        embed.add_field(
-            name="🎯 이슈",
-            value=f"`{issue_description[:200]}`",
-            inline=False,
-        )
-        embed.set_footer(
-            text=f"{result['model'].split('/')[-1]} · ${result['cost']:.5f}"
-        )
-        return embed
+        data = p.read_bytes()
+        truncated = False
+        if len(data) > _MAX_FILE_BYTES:
+            data = data[:_MAX_FILE_BYTES]
+            truncated = True
+        text = data.decode("utf-8", errors="replace")
+        if truncated:
+            text += "\n\n# ... (파일이 너무 커서 앞부분만 표시됨)"
+        return p, text
     except Exception as e:
+        log.error("코드 파일 읽기 실패: %s — %s", p, e)
+        return None
+
+
+async def rnd_code_review(target: str) -> discord.Embed:
+    """
+    코드 리뷰 명령.
+
+    Parameters
+    ----------
+    target : str
+        파일 경로(예: 'modules/rnd.py') 또는 코드/자유 문장.
+
+    Returns
+    -------
+    discord.Embed
+        리뷰 결과 임베드. (1)문법/런타임 (2)스타일/가독성
+        (3)개선 제안 (4)보안/성능 4가지 섹션 포함.
+    """
+    if not target or not target.strip():
         from bot.embeds import embed_error
-        return embed_error("진단 실패", str(e))
-
-
-# ── 4. 신규 봇 설계 ─────────────────────────────────────────────────
-async def design_new_bot(requirements: str) -> discord.Embed:
-    """
-    신규 봇 요구사항 → Claude Opus가 설계서 작성.
-    결과는 R&D 채널에도 자동 게시 (옵션).
-    """
-    try:
-        result = await chat(
-            messages=[
-                {"role": "system", "content": SYSTEM_BOT_DESIGN},
-                {"role": "user", "content": f"봇 요구사항:\n{requirements}"},
-            ],
-            agent="gaechyo",
-            tier="premium",   # 설계는 premium 사용
-            max_tokens=3000,
-            temperature=0.6,
+        return embed_error(
+            "코드 리뷰 실패",
+            "리뷰할 파일 경로 또는 코드/문장을 입력해주세요.\n"
+            "예) `/rnd_health modules/rnd.py`\n"
+            "예) `/rnd_health def foo(): return 1/0`",
         )
-        embed = discord.Embed(
-            title="📐 개쵸 — 신규 봇 설계서",
-            description=result["content"][:3500],
-            color=0x8B5CF6,
-        )
-        embed.add_field(
-            name="🎯 요구사항",
-            value=f"
+
+    source_label: str = "직접 입력"
+    code_for_review: str = target.strip()
+    resolved_path: Optional[Path] = None
+
+    # 1) 파일 경로처럼 보이면 읽기 시도
+    if _looks_like_path(target):
+        loaded = _read_code_file(target)
+        if loaded is not None:
+            resolved_path, code_for_review = loaded
+            try:
+                source_label = f"파일: `{resolved_path.relative_to(Path.cwd())}`"
+            except ValueError:
+                source_label = f"파일: `{resolved_path}`"
+        else:
+            # 경로 같았지만 못 읽음 → 문장 그대로 리뷰
+            source_label = "직접 입력 (경로 해석 실패)"
+
+    # 2) AI 리뷰 요청
+    user_prompt = (
+        f"다음 대상에 대해 코드 리뷰를 수행해주세요.\n\n"
+        f"**대상**: {source_label}\n\n"
+        f"
