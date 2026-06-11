@@ -12,6 +12,7 @@ modules/rnd.py
 OpenRouter: standard 티어 (Claude Opus 등)
 """
 
+import io
 import logging
 import os
 from pathlib import Path
@@ -22,6 +23,13 @@ import discord
 from utils.openrouter_client import chat
 
 log = logging.getLogger(__name__)
+
+# ── Discord 길이 제한 상수 ─────────────────────────────────────────
+DISCORD_MSG_LIMIT: int = 2000
+EMBED_DESC_LIMIT: int = 4096
+EMBED_DESC_SAFE: int = 4000  # 안전 마진
+EMBED_FIELD_LIMIT: int = 1024
+EMBED_TOTAL_LIMIT: int = 6000
 
 # ── 시스템 프롬프트 ─────────────────────────────────────────────────
 SYSTEM_QA = (
@@ -80,9 +88,67 @@ _MAX_FILE_BYTES: int = 50 * 1024
 _REVIEW_MAX_TOKENS: int = 16000
 
 
+# ── 공통 유틸: 길이 가드 ────────────────────────────────────────────
+def _truncate(text: str, limit: int, suffix: str = "\n…(생략)") -> str:
+    """문자열을 limit 이내로 잘라 반환."""
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    cut = max(0, limit - len(suffix))
+    return text[:cut] + suffix
+
+
+def _safe_embed_description(text: str) -> str:
+    """임베드 description 안전 길이로 truncate."""
+    return _truncate(text or "", EMBED_DESC_SAFE)
+
+
+async def send_long_text(
+    target: discord.abc.Messageable,
+    content: str,
+    *,
+    filename: str = "result.md",
+    header: Optional[str] = None,
+) -> None:
+    """
+    긴 텍스트를 안전하게 Discord에 전송.
+
+    - 2000자 이하: 그대로 전송
+    - 그 외: 첨부 파일(.md)로 전송하여 400 Bad Request(50035) 방지
+    """
+    try:
+        if not content:
+            await target.send(header or "(빈 응답)")
+            return
+
+        if header is None:
+            header = ""
+
+        full = f"{header}\n{content}" if header else content
+
+        if len(full) <= DISCORD_MSG_LIMIT:
+            await target.send(full)
+            return
+
+        # 파일 첨부 fallback
+        buffer = io.StringIO(content)
+        file = discord.File(buffer, filename=filename)
+        notice = header or "📎 응답이 길어 파일로 첨부합니다."
+        if len(notice) > DISCORD_MSG_LIMIT:
+            notice = notice[: DISCORD_MSG_LIMIT - 10] + "…"
+        await target.send(content=notice, file=file)
+    except discord.HTTPException as e:
+        log.error("send_long_text 실패: %s", e)
+        try:
+            await target.send(f"⚠️ 메시지 전송 실패: {e.code} — 길이/형식 문제일 수 있습니다.")
+        except Exception:
+            pass
+
+
 # ── 1. 기본 Q&A ─────────────────────────────────────────────────────
 async def handle_query(query: str) -> discord.Embed:
-    """R&D 자연어 질문 처리."""
+    """R&D 자연어 질문 처리 (/ask)."""
     try:
         result = await chat(
             messages=[
@@ -93,14 +159,23 @@ async def handle_query(query: str) -> discord.Embed:
             max_tokens=1500,
             temperature=0.4,
         )
+
+        content_text: str = result.get("content", "") or ""
+        model_name: str = result.get("model", "unknown").split("/")[-1]
+        cost_val: float = float(result.get("cost", 0.0))
+
+        # 임베드 description 안전 길이로 truncate
+        safe_desc = _safe_embed_description(content_text)
+
         embed = discord.Embed(
             title="🔧 개쵸 — R&D",
-            description=result["content"][:3500],
+            description=safe_desc if safe_desc else "(응답 없음)",
             color=0x06B6D4,
         )
-        embed.set_footer(
-            text=f"{result['model'].split('/')[-1]} · ${result['cost']:.5f}"
-        )
+        footer_text = f"{model_name} · ${cost_val:.5f}"
+        if len(content_text) > EMBED_DESC_SAFE:
+            footer_text += " · 일부 생략됨"
+        embed.set_footer(text=footer_text[:2048])
         return embed
     except Exception as e:
         from bot.embeds import embed_error
@@ -203,15 +278,15 @@ async def rnd_code_review(target: str) -> discord.Embed:
         if loaded is not None:
             resolved_path, code_for_review = loaded
             try:
-                source_label = f"파일: `{resolved_path.relative_to(Path.cwd())}`"
+                rel_path = resolved_path.relative_to(Path.cwd())
+                source_label = f"파일: `{rel_path}`"
             except ValueError:
                 source_label = f"파일: `{resolved_path}`"
         else:
             # 경로 같았지만 못 읽음 → 문장 그대로 리뷰
             source_label = "직접 입력 (경로 해석 실패)"
 
-    # 2) AI 리뷰 요청
-    user_prompt = (
-        f"다음 대상에 대해 코드 리뷰를 수행해주세요.\n\n"
-        f"**대상**: {source_label}\n\n"
-        f"
+    # 2) AI 리뷰 요청 (f-string 따옴표 충돌 회피를 위해 삼중따옴표 사용)
+    user_prompt = f"""다음 대상에 대해 코드 리뷰를 수행해주세요.
+
+**대상**: {source_label}
