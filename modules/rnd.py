@@ -274,7 +274,7 @@ def _read_code_file(path_str: str) -> Optional[tuple[Path, str]]:
         return None
 
 
-async def rnd_code_review(target: str) -> discord.Embed:
+async def run_health_check(target: str) -> discord.Embed:
     """
     코드 리뷰 명령.
 
