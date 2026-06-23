@@ -116,6 +116,15 @@ HELP_PAGES = [
                 ),
                 "inline": False,
             },
+            {
+                "name": "📚 자율 학습",
+                "value": (
+                    "`/gicho_learn_add [주제] [소스]` — 학습 항목 등록 (승인 대기 또는 즉시 시작)\n"
+                    "`/gicho_learn_approve [ID]` — 등록된 학습 승인 + 실행\n"
+                    "`/gicho_learn_status [ID]` — 학습 항목/결과 조회"
+                ),
+                "inline": False,
+            },
         ],
         "footer": "Claude Opus 4.7 · Notion + Perplexity 데이터 종합",
     },
@@ -283,16 +292,26 @@ HELP_PAGES = [
                 "inline": False,
             },
             {
+                "name": "🛠️ 자동 코드 변경 (2단계 승인)",
+                "value": (
+                    "`/code_propose [요청]` — 자연어 요청 → 분석 → 계획 → 코드 생성 → GitHub PR\n"
+                    "`/code_sessions` — 최근 코드 변경 세션 목록\n"
+                    "`/code_diagnose` — GitHub 연동 상태 진단\n"
+                    "`/rnd_forum_channel` — 코드 변경 포럼 채널 설정"
+                ),
+                "inline": False,
+            },
+            {
                 "name": "🤖 자동 실행",
                 "value": (
                     "• 매일 08:00 — 건강 체크 리포트\n"
                     "• 10분마다 — 에러 임계치(5회) 감지\n"
-                    "• 재부팅 시 — 업데이트 공지"
+                    "• 재부팅 시 — 업데이트 공지 + 미설정 연동 알림"
                 ),
                 "inline": False,
             },
         ],
-        "footer": "Claude Opus 4.7 · R&D 채널 자동 기록",
+        "footer": "Claude Opus 4.7 · R&D 채널 자동 기록 · 세션은 메모리 저장(재시작 시 초기화)",
     },
 
     # ── Page 8: 디쵸 ──────────────────────────────────────────
@@ -373,7 +392,8 @@ HELP_PAGES = [
                 "value": (
                     "`/rawdata` — 트레이스 모드 (off/ephemeral/channel/both)\n"
                     "`/uptime` — 봇 가동 시간\n"
-                    "`/reboot` — 봇 재부팅"
+                    "`/reboot` — 봇 즉시 재부팅\n"
+                    "`/restart_schedule` — 자동 재부팅 시각 변경 (기본 매일 04:00 KST)"
                 ),
                 "inline": False,
             },

@@ -1,7 +1,7 @@
 # Cho's 매니지먼트 봇
 
 스트리머 AI 매니지먼트 시스템.  
-Discord Header 봇 1개 + 내부 모듈 7개 + 방송 모니터링 엔진.
+Discord 봇 1개 + 페르소나별 내부 모듈(개쵸/해쵸/인쵸/기쵸/분쵸/스쵸/모쵸/디쵸) + 방송 모니터링 엔진.
 
 ---
 
@@ -10,7 +10,7 @@ Discord Header 봇 1개 + 내부 모듈 7개 + 방송 모니터링 엔진.
 ```bash
 # 1. 클론 & 환경 세팅
 git clone <your-repo>
-cd chos_management
+cd chip_bot
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 
@@ -21,8 +21,9 @@ pip install -r requirements.txt
 cp .env.example .env
 # .env 파일을 열어서 모든 API 키 입력
 
-# 4. 실행
-python bot/main.py
+# 4. 실행 (프로젝트 루트에서, 모듈 형태로 — 그냥 python bot/main.py로 실행하면
+#    bot/이 sys.path에 잡혀 modules/utils 절대 import가 깨짐)
+python -m bot.main
 ```
 
 ---
@@ -30,39 +31,65 @@ python bot/main.py
 ## 폴더 구조
 
 ```
-chos_management/
-├── .env                  ← API 키 (Git 제외)
-├── .env.example          ← 템플릿
+chip_bot/
+├── .env                        ← API 키 (Git 제외)
+├── .env.example                ← 템플릿
 ├── requirements.txt
-├── railway.toml          ← Railway 배포 설정
+├── railway.toml                ← Railway 배포 설정 (python -m bot.main)
 ├── bot/
-│   ├── main.py           ← 봇 진입점
-│   ├── commands.py       ← 슬래시 커맨드
-│   ├── router.py         ← Gemini 라우팅 엔진
-│   └── embeds.py         ← Discord Embed 포맷터
+│   ├── main.py                 ← 봇 진입점 + 스케줄러 등록 + on_ready
+│   ├── commands.py             ← 모든 슬래시 커맨드 등록 (가장 큰 파일)
+│   ├── router.py                ← OpenRouter 기반 자연어 라우팅 엔진
+│   ├── embeds.py                ← Discord Embed 포맷터/헬퍼
+│   ├── help_view.py             ← /help 명령 콘텐츠
+│   ├── interactive.py           ← /ask 진행 상태 View (정지 버튼 등)
+│   ├── code_planning_view.py    ← /code_propose 1단계: 계획 승인 UI
+│   └── code_approval_view.py    ← /code_propose 2단계: 코드 변경 승인 UI
 ├── modules/
-│   ├── youtube_auth.py   ← YouTube OAuth
-│   ├── youtube_analytics.py
-│   ├── youtube_live.py
-│   ├── weekly_report.py  ← 주간 리포트 + 스케줄러
-│   ├── chzzk_monitor.py  ← 치지직 모니터링
-│   ├── soop_monitor.py   ← SOOP (Phase 6)
-│   ├── competitor_analysis.py
-│   ├── content_suggest.py
-│   ├── money.py
-│   ├── planning.py
-│   ├── schedule.py
-│   ├── rnd.py
-│   └── design.py
+│   ├── haecho.py                ← 해쵸: 멀티 에이전트 오케스트레이터 (/ask 핵심)
+│   ├── rnd.py                   ← 개쵸: 코드 리뷰/코드베이스 점검/이슈 진단/신규 설계
+│   ├── code_planner.py          ← 개쵸: 자동 코드 변경 — 계획 수립 (/code_propose)
+│   ├── code_modifier.py         ← 개쵸: 자동 코드 변경 — 적용 + GitHub PR 생성
+│   ├── code_publisher.py        ← 개쵸 코드 변경 결과 R&D 포럼 게시
+│   ├── money.py                 ← 인쵸: 자금 현황 + 크레딧 임계치 알림 + 월말정산
+│   ├── fixed_costs.py           ← 인쵸: 고정비 납부 일정 (로컬 JSON + Notion 선택 연동)
+│   ├── schedule.py              ← 스쵸: 일정 조회/등록/수정/삭제 (Notion)
+│   ├── weekly_report.py         ← 분쵸: 주간 리포트 생성 + 자동 발송 스케줄러
+│   ├── competitor_analysis.py   ← 분쵸: 경쟁 채널 분석
+│   ├── content_suggest.py       ← 기쵸: 콘텐츠 개선 제안
+│   ├── planning.py              ← 기쵸: 기획서/협업 제안서 생성
+│   ├── gicho_learning.py        ← 기쵸: 트렌드/기획 기법 자율 학습
+│   ├── design.py                ← 디쵸: 디자인/Figma 레퍼런스 제안
+│   ├── chzzk_monitor.py         ← 치지직 방송 모니터링
+│   └── youtube_analytics.py     ← 유튜브 채널 통계
 ├── utils/
-│   ├── notion_client.py  ← Notion API 공통 레이어
-│   ├── keyword_alert.py  ← 키워드 실시간 감지
-│   ├── viewer_tracker.py ← 시청자 수 트래킹
-│   ├── logger.py
-│   └── helpers.py
-└── data/
-    ├── streamers.json
-    └── keywords.json
+│   ├── openrouter_client.py     ← 모든 LLM 호출 단일 진입점 (모델 티어링/캐시/폴백)
+│   ├── notion_client.py         ← Notion API 공통 레이어
+│   ├── github_client.py         ← GitHub API (브랜치/커밋/PR) — /code_propose용
+│   ├── config_manager.py        ← API 키 .env 영속화 (/config_* 커맨드)
+│   ├── model_config.py          ← 모델 티어 오버라이드 영속화
+│   ├── credit_config.py         ← 크레딧 월 한도/알림 임계치 영속화
+│   ├── json_store.py            ← 공통 JSON 파일 읽기/쓰기 헬퍼
+│   ├── persistent_store.py      ← 기타 런타임 설정값 영속화
+│   ├── cost_tracker.py          ← OpenRouter 사용 비용 SQLite 누적
+│   ├── self_monitor.py          ← 런타임 에러 감지 + R&D 채널 자동 알림
+│   ├── restart_manager.py       ← 자동/수동 재부팅 + KST 시간 유틸
+│   ├── message_splitter.py      ← 긴 응답 분할 전송 + MD/HTML 파일 변환
+│   ├── response_cache.py        ← 응답 캐싱
+│   ├── pipeline_logger.py       ← Raw Data 트레이스 로깅
+│   ├── conversation_context.py ← /ask 답장(reply) 컨텍스트 수집
+│   ├── keyword_alert.py         ← 키워드 실시간 감지
+│   ├── viewer_tracker.py        ← 시청자 수 트래킹
+│   ├── persona.py               ← 에이전트별 캐릭터/Webhook 발화
+│   ├── url_analyzer.py          ← URL(GitHub 등) 콘텐츠 분석
+│   ├── forum_publisher.py       ← 해쵸 세션 결과 포럼 게시
+│   ├── logger.py                ← 로깅 설정
+│   └── helpers.py               ← 공통 헬퍼
+└── data/                        ← Railway Volume 또는 로컬 폴백 (Git 제외)
+    ├── fixed_costs.json
+    ├── credit_config.json
+    ├── model_config.json
+    └── cost_tracker.db
 ```
 
 ---

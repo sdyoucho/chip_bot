@@ -19,6 +19,7 @@ import ast
 import io
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -184,10 +185,22 @@ async def send_long_text(
 async def handle_query(query: str) -> discord.Embed:
     """R&D 자연어 질문 처리 (/ask 라우터에서 호출)."""
     try:
+        # 질문에 실제 파일 경로가 언급되어 있으면 내용을 읽어 컨텍스트로 첨부
+        # (없으면 LLM이 파일을 보지 못한 채 추측으로만 답하게 됨)
+        file_context = ""
+        loaded = _find_referenced_file(query)
+        if loaded is not None:
+            resolved_path, code_text = loaded
+            try:
+                rel_path = resolved_path.relative_to(Path.cwd())
+            except ValueError:
+                rel_path = resolved_path
+            file_context = f"\n\n[참조 파일: {rel_path}]\n```\n{code_text[:20000]}\n```"
+
         result = await chat(
             messages=[
                 {"role": "system", "content": SYSTEM_QA},
-                {"role": "user", "content": query},
+                {"role": "user", "content": query + file_context},
             ],
             agent="gaechyo",
             max_tokens=1500,
@@ -278,6 +291,39 @@ def _read_code_file(path_str: str) -> Optional[tuple[Path, str]]:
         return None
 
 
+def _find_referenced_file(query: str) -> Optional[tuple[Path, str]]:
+    """
+    자연어 질문 안에서 파일 경로처럼 보이는 토큰을 찾아 읽어옴 (첫 매칭 1건).
+    예: "modules/money.py 에서 왜 에러나는거야?" → 해당 파일 내용 반환.
+    디렉터리 없이 파일명만 언급한 경우(예: "money.py")는 modules/utils/bot에서 탐색.
+    """
+    for raw_token in re.split(r"[\s,]+", query):
+        token = raw_token.strip("`\"'()[]{}:;.,")
+        if not token or token.startswith(("http://", "https://")):
+            continue
+        looks_like_path = (
+            any(token.endswith(ext) for ext in _CODE_EXTENSIONS) or "/" in token
+        )
+        if not looks_like_path:
+            continue
+
+        loaded = _read_code_file(token)
+        if loaded is not None:
+            return loaded
+
+        if "/" not in token and "\\" not in token:
+            for d in _SCAN_DIRS:
+                base = _PROJECT_ROOT / d
+                if not base.exists():
+                    continue
+                matches = list(base.rglob(token))
+                if matches:
+                    loaded = _read_code_file(str(matches[0]))
+                    if loaded is not None:
+                        return loaded
+    return None
+
+
 async def run_code_review(target: str) -> discord.Embed:
     """
     코드 리뷰 명령 (/rnd_code_review).
@@ -306,25 +352,45 @@ async def run_code_review(target: str) -> discord.Embed:
     source_label: str = "직접 입력"
     code_for_review: str = target.strip()
     resolved_path: Optional[Path] = None
+    extra_instruction: str = ""
 
-    # 1) 파일 경로처럼 보이면 읽기 시도
-    if _looks_like_path(target):
-        loaded = _read_code_file(target)
+    # 1) 맨 앞 토큰이 파일 경로처럼 보이면 분리해서 읽기 시도
+    #    (예: "modules/rnd.py 의 예외처리가 안전한지 봐줘" → 경로 + 나머지 지시문)
+    cleaned = target.strip().strip("`").strip('"').strip("'")
+    parts = cleaned.split(None, 1) if cleaned else []
+    leading_token = parts[0] if parts else ""
+    remainder = parts[1].strip() if len(parts) > 1 else ""
+    leading_token_looks_like_path = bool(leading_token) and (
+        any(leading_token.endswith(ext) for ext in _CODE_EXTENSIONS)
+        or "/" in leading_token or "\\" in leading_token
+    )
+
+    loaded = None
+    if leading_token_looks_like_path:
+        loaded = _read_code_file(leading_token)
         if loaded is not None:
-            resolved_path, code_for_review = loaded
-            try:
-                rel_path = resolved_path.relative_to(Path.cwd())
-                source_label = f"파일: `{rel_path}`"
-            except ValueError:
-                source_label = f"파일: `{resolved_path}`"
-        else:
-            source_label = "직접 입력 (경로 해석 실패)"
+            extra_instruction = remainder
 
-    # 2) AI 리뷰 요청
+    # 2) 위에서 못 찾았으면, 전체 문자열 자체가 경로인 경우도 시도 (기존 동작 유지)
+    if loaded is None and _looks_like_path(target):
+        loaded = _read_code_file(target)
+
+    if loaded is not None:
+        resolved_path, code_for_review = loaded
+        try:
+            rel_path = resolved_path.relative_to(Path.cwd())
+            source_label = f"파일: `{rel_path}`"
+        except ValueError:
+            source_label = f"파일: `{resolved_path}`"
+    elif leading_token_looks_like_path:
+        source_label = "직접 입력 (경로 해석 실패)"
+
+    # 3) AI 리뷰 요청
     user_prompt = (
         "다음 대상에 대해 코드 리뷰를 수행해주세요.\n\n"
         f"**대상**: {source_label}\n\n"
-        "```\n"
+        + (f"**추가 요청사항**: {extra_instruction}\n\n" if extra_instruction else "")
+        + "```\n"
         f"{code_for_review[:30000]}\n"
         "```\n\n"
         "위 4가지 항목(문법/런타임, 스타일/가독성, 개선 제안, 보안/성능)으로 "

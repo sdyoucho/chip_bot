@@ -1,6 +1,6 @@
 """
 modules/code_modifier.py
-기쵸의 자동 코드 수정 시스템.
+개쵸(rnd)의 자동 코드 수정 시스템. /code_propose 명령으로 호출됨.
 
 워크플로:
 1. 변경 제안 생성 (AI)

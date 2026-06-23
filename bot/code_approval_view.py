@@ -1,6 +1,6 @@
 """
 bot/code_approval_view.py
-기쵸 코드 수정 제안 승인/거부 UI.
+개쵸(rnd) 코드 수정 제안 승인/거부 UI.
 """
 
 import logging
