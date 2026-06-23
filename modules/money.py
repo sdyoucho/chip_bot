@@ -20,12 +20,11 @@ from utils.cost_tracker import (
     get_monthly_total, get_by_agent, get_by_model,
     get_daily_series, project_next_month,
 )
+from utils.credit_config import (
+    get_monthly_limit, get_thresholds, is_alerted, mark_alerted,
+)
 
 log = logging.getLogger(__name__)
-
-# 임계치 (0~1)
-ALERT_THRESHOLDS = [0.5, 0.7, 1.0]
-_alerted: set[float] = set()   # 이번 달 이미 알림 보낸 임계치
 
 # 고정비 (서버·구독)
 FIXED_COSTS_KRW = {
@@ -42,25 +41,30 @@ async def get_financial_summary() -> discord.Embed:
     by_agent = await get_by_agent()
     by_model = await get_by_model()
 
-    usage_ratio = credits["usage_ratio"]
-    bar = _progress_bar(usage_ratio)
-    color = _color_by_ratio(usage_ratio)
+    monthly_limit = get_monthly_limit()
+    month_ratio = month_total / monthly_limit if monthly_limit else 0
+    bar = _progress_bar(month_ratio)
+    color = _color_by_ratio(month_ratio)
 
     embed = discord.Embed(
         title="💰 인쵸 — 자금 현황",
         description=(
-            f"**OpenRouter 크레딧**\n"
-            f"{bar} `{usage_ratio*100:.1f}%`\n"
-            f"사용: `${credits['usage']:.3f}` / 총 `${credits['total']:.3f}`\n"
-            f"잔여: **`${credits['remaining']:.3f}`**"
+            f"**이번 달 크레딧 한도**\n"
+            f"{bar} `{month_ratio*100:.1f}%`\n"
+            f"사용: `${month_total:.3f}` / 한도 `${monthly_limit:.2f}`\n"
+            f"잔여: **`${monthly_limit - month_total:.3f}`**"
         ),
         color=color,
     )
 
-    # 이번 달 지출
+    # OpenRouter 계정 전체 잔여 크레딧 (참고용 — 알림 기준 아님)
     embed.add_field(
-        name="📅 이번 달 누적 지출",
-        value=f"**${month_total:.4f}** (≈ ₩{int(month_total * 1380):,})",
+        name="🌐 OpenRouter 계정 잔여",
+        value=(
+            f"사용: `${credits['usage']:.3f}` / 총 `${credits['total']:.3f}` "
+            f"(`{credits['usage_ratio']*100:.1f}%`)\n"
+            f"잔여: `${credits['remaining']:.3f}`"
+        ),
         inline=False,
     )
 
@@ -88,48 +92,56 @@ async def get_financial_summary() -> discord.Embed:
         inline=False,
     )
 
-    embed.set_footer(text="임계치 50%/70%/100% 자동 알림 | /settlement 로 월말정산")
+    thresholds_label = "/".join(f"{int(t*100)}%" for t in get_thresholds())
+    embed.set_footer(text=f"임계치 {thresholds_label} 자동 알림 | /settlement 로 월말정산")
     return embed
 
 
 # ── 임계치 모니터링 (스케줄러에서 15분마다 호출) ───────────────────
 async def check_thresholds(bot: discord.Client) -> None:
-    """크레딧 사용률이 임계치를 넘으면 Cho에게 DM."""
-    import os
-    credits = await get_remaining_credits()
-    ratio = credits["usage_ratio"]
+    """이번 달 크레딧 사용률(월 한도 기준)이 임계치를 넘으면 Cho에게 DM.
 
-    for threshold in ALERT_THRESHOLDS:
-        if ratio >= threshold and threshold not in _alerted:
-            _alerted.add(threshold)
-            await _send_threshold_alert(bot, threshold, credits)
+    OpenRouter 계정의 전체(누적) 크레딧이 아니라, 이번 달 실사용액을
+    월 한도로 나눈 비율을 기준으로 한다. 발송 여부는 "YYYY-MM" 단위로
+    파일에 영속화되어, 봇이 재시작돼도 같은 달에 같은 임계치를 다시
+    보내지 않는다 (재시작 시 50%/70%가 동시에 오던 버그의 원인).
+    """
+    month_total = await get_monthly_total()
+    monthly_limit = get_monthly_limit()
+    ratio = month_total / monthly_limit if monthly_limit else 0
+    month_key = datetime.now().strftime("%Y-%m")
+
+    for threshold in get_thresholds():
+        if ratio >= threshold and not is_alerted(month_key, threshold):
+            mark_alerted(month_key, threshold)
+            await _send_threshold_alert(bot, threshold, month_total, monthly_limit)
 
 
-async def _send_threshold_alert(bot, threshold: float, credits: dict) -> None:
+async def _send_threshold_alert(bot, threshold: float, month_total: float, monthly_limit: float) -> None:
     import os
     cho_id = int(os.getenv("CHO_USER_ID", "0"))
     if not cho_id:
         return
 
-    emoji = {0.5: "🟡", 0.7: "🟠", 1.0: "🔴"}[threshold]
-    title = f"{emoji} 인쵸 — 크레딧 {int(threshold*100)}% 도달"
-    color = {0.5: 0xEAB308, 0.7: 0xF97316, 1.0: 0xDC2626}[threshold]
+    emoji = "🔴" if threshold >= 1.0 else "🟠" if threshold >= 0.7 else "🟡"
+    color = 0xDC2626 if threshold >= 1.0 else 0xF97316 if threshold >= 0.7 else 0xEAB308
+    title = f"{emoji} 인쵸 — 이번 달 크레딧 {int(threshold*100)}% 도달"
 
     try:
         user = await bot.fetch_user(cho_id)
         embed = discord.Embed(
             title=title,
             description=(
-                f"OpenRouter 크레딧 사용률이 **{int(threshold*100)}%**를 넘었습니다.\n\n"
-                f"사용: `${credits['usage']:.3f}` / 총 `${credits['total']:.3f}`\n"
-                f"잔여: `${credits['remaining']:.3f}`"
+                f"이번 달 크레딧 사용률이 **{int(threshold*100)}%**를 넘었습니다.\n\n"
+                f"사용: `${month_total:.3f}` / 한도 `${monthly_limit:.2f}`\n"
+                f"잔여: `${monthly_limit - month_total:.3f}`"
             ),
             color=color,
         )
         if threshold >= 1.0:
             embed.add_field(
                 name="⚠️ 조치 필요",
-                value="크레딧 충전 또는 서비스 일시 중단 권고",
+                value="월 한도 상향 또는 서비스 일시 중단 권고 (`/credit_limit`로 조정 가능)",
                 inline=False,
             )
         await user.send(embed=embed)
@@ -193,8 +205,7 @@ async def monthly_settlement() -> discord.Embed:
 
     embed.set_footer(text=f"매월 말일 23시 자동 생성 | 생성: {now:%Y-%m-%d %H:%M}")
 
-    # 임계치 카운터 리셋
-    _alerted.clear()
+    # 임계치 알림 기록은 "YYYY-MM" 단위로 영속화되므로 달이 바뀌면 자동으로 리셋됨
     return embed
 
 

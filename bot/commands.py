@@ -732,6 +732,50 @@ async def setup_commands(bot: commands.Bot):
         except Exception as e:
             await _send_error(interaction, error_title="정산 오류", error=e)
 
+    @bot.tree.command(name="credit_settings", description="크레딧 알림 설정 조회 (월 한도/임계치)")
+    @is_cho()
+    async def cmd_credit_settings(interaction: discord.Interaction):
+        from utils.credit_config import get_monthly_limit, get_thresholds
+        from utils.cost_tracker import get_monthly_total
+
+        monthly_limit = get_monthly_limit()
+        month_total = await get_monthly_total()
+        ratio = month_total / monthly_limit if monthly_limit else 0
+        thresholds_label = ", ".join(f"{int(t*100)}%" for t in get_thresholds())
+
+        embed = discord.Embed(title="⚙️ 인쵸 — 크레딧 알림 설정", color=0x4F46E5)
+        embed.add_field(name="월 한도", value=f"${monthly_limit:.2f}", inline=True)
+        embed.add_field(name="이번 달 사용", value=f"${month_total:.3f} ({ratio*100:.1f}%)", inline=True)
+        embed.add_field(name="알림 임계치", value=thresholds_label, inline=False)
+        embed.set_footer(text="변경: /credit_limit · /credit_thresholds")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="credit_limit", description="월 크레딧 한도(USD) 설정")
+    @is_cho()
+    @app_commands.describe(amount="월 한도 (USD, 예: 50)")
+    async def cmd_credit_limit(interaction: discord.Interaction, amount: float):
+        from utils.credit_config import set_monthly_limit
+        try:
+            set_monthly_limit(amount)
+            embed = embed_success("월 한도 변경 완료", f"이번 달부터 한도 `${amount:.2f}` 적용")
+        except ValueError as e:
+            embed = embed_error("변경 실패", str(e))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="credit_thresholds", description="크레딧 알림 임계치(%) 설정")
+    @is_cho()
+    @app_commands.describe(thresholds="쉼표로 구분된 퍼센트 (예: 50,70,90)")
+    async def cmd_credit_thresholds(interaction: discord.Interaction, thresholds: str):
+        from utils.credit_config import set_thresholds
+        try:
+            values = [float(t.strip()) / 100 for t in thresholds.split(",") if t.strip()]
+            set_thresholds(values)
+            label = ", ".join(f"{int(v*100)}%" for v in sorted(values))
+            embed = embed_success("임계치 변경 완료", f"알림 임계치 → {label}")
+        except ValueError as e:
+            embed = embed_error("변경 실패", f"퍼센트 숫자를 쉼표로 구분해 입력하세요 (예: 50,70,90).\n{e}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # ───────────────────────────────────────────────────────────
     # 스트리머 관리
     # ───────────────────────────────────────────────────────────

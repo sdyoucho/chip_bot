@@ -185,8 +185,8 @@ HELP_PAGES = [
     {
         "title": "💰 인쵸 — 자금·토큰 관리",
         "description": (
-            "OpenRouter 크레딧, AI 토큰 비용, 고정비를 통합 관리합니다.\n"
-            "50%/70%/100% 임계 도달 시 자동 DM 알림."
+            "이번 달 크레딧 사용액(월 한도 기준)과 AI 토큰 비용, 고정비를 통합 관리합니다.\n"
+            "설정된 임계치(기본 50%/70%/100%) 도달 시 자동 DM 알림."
         ),
         "color": 0x059669,
         "fields": [
@@ -195,6 +195,15 @@ HELP_PAGES = [
                 "value": (
                     "`/money` — 현재 자금 현황\n"
                     "`/settlement` — 월말 정산 + 다음 달 예상"
+                ),
+                "inline": False,
+            },
+            {
+                "name": "⚙️ 크레딧 알림 설정",
+                "value": (
+                    "`/credit_settings` — 월 한도/임계치 조회\n"
+                    "`/credit_limit` — 월 크레딧 한도(USD) 설정\n"
+                    "`/credit_thresholds` — 알림 임계치(%) 설정 (예: 50,70,90)"
                 ),
                 "inline": False,
             },

@@ -88,6 +88,9 @@ python -c "from modules.youtube_auth import start_oauth_flow; start_oauth_flow('
 | `/youtube [스트리머]` | 유튜브 통계 |
 | `/schedule` | 스케줄 확인 |
 | `/money` | 자금·비용 현황 |
+| `/credit_settings` | 월 한도/임계치 조회 |
+| `/credit_limit` | 월 크레딧 한도(USD) 설정 |
+| `/credit_thresholds` | 알림 임계치(%) 설정 |
 | `/streamer_add` | 스트리머 등록 |
 | `/streamer_list` | 스트리머 목록 |
 
