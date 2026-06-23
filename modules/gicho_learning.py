@@ -1,26 +1,29 @@
 """
 modules/gicho_learning.py
 기쵸 러닝 시스템 — 콘텐츠 트렌드/기획 기법 자율 학습.
+저장소: Notion DB (NOTION_GICHO_LEARNING_DB).
 """
 
 import asyncio
 import json
 import logging
-import sqlite3
-import uuid
-from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
+from utils.notion_client import (
+    create_learning_item as _create_learning_item,
+    approve_learning_item,
+    reject_learning_item,
+    get_learning_item,
+    list_learning_items,
+    update_learning_status,
+    save_learning_analysis,
+    search_learning_items,
+    get_learning_stats,
+)
 from utils.openrouter_client import chat
 from utils.url_analyzer import fetch_url_content
 
 log = logging.getLogger(__name__)
-
-# SQLite DB 경로 (Railway는 /tmp 가 휘발성이라 영구 저장 필요)
-DB_DIR = Path(os.getenv("LEARNING_DB_DIR", "data"))
-DB_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = DB_DIR / "gicho_learning.db"
 
 # 학습 카테고리
 CATEGORIES = [
@@ -38,50 +41,11 @@ CATEGORIES = [
 STATUSES = ["requested", "approved", "learning", "completed", "rejected", "failed"]
 
 
-import os
-
-
 # ═══════════════════════════════════════════════════════════════════
-# DB 초기화
+# CRUD (Notion DB 위임)
 # ═══════════════════════════════════════════════════════════════════
 
-def _init_db():
-    """SQLite 테이블 생성."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS learning_items (
-                id TEXT PRIMARY KEY,
-                subject TEXT NOT NULL,
-                category TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'requested',
-                sources TEXT NOT NULL,
-                requested_by TEXT,
-                requested_at TEXT NOT NULL,
-                approved_at TEXT,
-                completed_at TEXT,
-                summary TEXT,
-                insights TEXT,
-                applications TEXT,
-                cost_usd REAL DEFAULT 0,
-                error_message TEXT
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON learning_items(status)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_category ON learning_items(category)")
-        conn.commit()
-    finally:
-        conn.close()
-
-
-_init_db()
-
-
-# ═══════════════════════════════════════════════════════════════════
-# CRUD
-# ═══════════════════════════════════════════════════════════════════
-
-def create_learning_item(
+async def create_learning_item(
     subject: str,
     category: str = "기타",
     sources: list[str] = None,
@@ -91,113 +55,37 @@ def create_learning_item(
     """학습 요청 등록."""
     if category not in CATEGORIES:
         category = "기타"
-
-    item_id = str(uuid.uuid4())[:8]
-    sources_json = json.dumps(sources or [], ensure_ascii=False)
-    now = datetime.now().isoformat()
-
-    status = "approved" if auto_approve else "requested"
-    approved_at = now if auto_approve else None
-
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute("""
-            INSERT INTO learning_items
-            (id, subject, category, status, sources, requested_by,
-             requested_at, approved_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (item_id, subject, category, status, sources_json, requested_by, now, approved_at))
-        conn.commit()
-    finally:
-        conn.close()
-
-    return {
-        "id": item_id,
-        "subject": subject,
-        "category": category,
-        "status": status,
-        "sources": sources or [],
-        "requested_at": now,
-    }
+    return await _create_learning_item(
+        subject=subject,
+        category=category,
+        sources=sources,
+        requested_by=requested_by,
+        auto_approve=auto_approve,
+    )
 
 
-def approve_item(item_id: str) -> bool:
+async def approve_item(item_id: str) -> bool:
     """학습 항목 승인."""
-    now = datetime.now().isoformat()
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.execute("""
-            UPDATE learning_items
-            SET status = 'approved', approved_at = ?
-            WHERE id = ? AND status = 'requested'
-        """, (now, item_id))
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
+    return await approve_learning_item(item_id)
 
 
-def reject_item(item_id: str, reason: str = "") -> bool:
+async def reject_item(item_id: str, reason: str = "") -> bool:
     """학습 항목 거부."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.execute("""
-            UPDATE learning_items
-            SET status = 'rejected', error_message = ?
-            WHERE id = ?
-        """, (reason, item_id))
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
+    return await reject_learning_item(item_id, reason)
 
 
-def get_item(item_id: str) -> Optional[dict]:
+async def get_item(item_id: str) -> Optional[dict]:
     """학습 항목 조회."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT * FROM learning_items WHERE id = ?", (item_id,),
-        ).fetchone()
-        if row:
-            item = dict(row)
-            item["sources"] = json.loads(item["sources"] or "[]")
-            return item
-        return None
-    finally:
-        conn.close()
+    return await get_learning_item(item_id)
 
 
-def list_items(
+async def list_items(
     status: Optional[str] = None,
     category: Optional[str] = None,
     limit: int = 20,
 ) -> list[dict]:
     """학습 항목 목록."""
-    sql = "SELECT * FROM learning_items WHERE 1=1"
-    params = []
-    if status:
-        sql += " AND status = ?"
-        params.append(status)
-    if category:
-        sql += " AND category = ?"
-        params.append(category)
-    sql += " ORDER BY requested_at DESC LIMIT ?"
-    params.append(limit)
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(sql, params).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            item["sources"] = json.loads(item["sources"] or "[]")
-            items.append(item)
-        return items
-    finally:
-        conn.close()
+    return await list_learning_items(status=status, category=category, limit=limit)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -228,15 +116,14 @@ JSON만 출력. 마크다운 코드 블록 사용하지 마세요."""
 
 async def execute_learning(item_id: str) -> dict:
     """학습 실행. 비동기 백그라운드 호출."""
-    item = get_item(item_id)
+    item = await get_learning_item(item_id)
     if not item:
         return {"success": False, "error": "항목을 찾을 수 없음"}
 
     if item["status"] not in ("approved",):
         return {"success": False, "error": f"실행 불가 상태: {item['status']}"}
 
-    # 상태 갱신
-    _update_status(item_id, "learning")
+    await update_learning_status(item_id, "learning")
 
     try:
         # 1) 모든 소스 URL fetch
@@ -259,7 +146,7 @@ async def execute_learning(item_id: str) -> dict:
             )
 
         if not source_contents:
-            _update_status(item_id, "failed", "유효한 소스가 없음")
+            await update_learning_status(item_id, "failed", "유효한 소스가 없음")
             return {"success": False, "error": "유효한 소스가 없음"}
 
         combined = "\n\n---\n\n".join(source_contents)
@@ -292,60 +179,20 @@ async def execute_learning(item_id: str) -> dict:
             if m:
                 analysis = json.loads(m.group())
             else:
-                _update_status(item_id, "failed", "JSON 파싱 실패")
+                await update_learning_status(item_id, "failed", "JSON 파싱 실패")
                 return {"success": False, "error": "AI 응답 파싱 실패"}
 
         # 5) DB 저장
-        _save_analysis(item_id, analysis, cost=result.get("cost", 0))
-        _update_status(item_id, "completed")
+        await save_learning_analysis(item_id, analysis, cost=result.get("cost", 0))
+        await update_learning_status(item_id, "completed")
 
         log.info(f"학습 완료 ({item_id})")
         return {"success": True, "analysis": analysis, "item_id": item_id}
 
     except Exception as e:
         log.exception(f"학습 실패 ({item_id})")
-        _update_status(item_id, "failed", str(e)[:500])
+        await update_learning_status(item_id, "failed", str(e)[:500])
         return {"success": False, "error": str(e)}
-
-
-def _update_status(item_id: str, status: str, error_message: str = ""):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        if status == "completed":
-            conn.execute(
-                "UPDATE learning_items SET status = ?, completed_at = ? WHERE id = ?",
-                (status, datetime.now().isoformat(), item_id),
-            )
-        else:
-            conn.execute(
-                "UPDATE learning_items SET status = ?, error_message = ? WHERE id = ?",
-                (status, error_message, item_id),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _save_analysis(item_id: str, analysis: dict, cost: float = 0):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute("""
-            UPDATE learning_items
-            SET summary = ?,
-                insights = ?,
-                applications = ?,
-                cost_usd = cost_usd + ?
-            WHERE id = ?
-        """, (
-            analysis.get("summary", ""),
-            json.dumps(analysis.get("insights", []), ensure_ascii=False),
-            json.dumps(analysis.get("applications", []), ensure_ascii=False),
-            cost,
-            item_id,
-        ))
-        conn.commit()
-    finally:
-        conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -354,52 +201,12 @@ def _save_analysis(item_id: str, analysis: dict, cost: float = 0):
 
 async def search_learning(query: str, limit: int = 5) -> list[dict]:
     """
-    학습 DB에서 관련 항목 검색 (간단한 키워드 매칭).
+    학습 DB에서 관련 항목 검색.
     /ask 기획 호출 시 자동으로 호출되어 컨텍스트 enrichment에 사용.
     """
-    sql = """
-        SELECT * FROM learning_items
-        WHERE status = 'completed'
-          AND (subject LIKE ? OR summary LIKE ? OR insights LIKE ?)
-        ORDER BY completed_at DESC
-        LIMIT ?
-    """
-    pattern = f"%{query}%"
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(sql, (pattern, pattern, pattern, limit)).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            item["sources"] = json.loads(item["sources"] or "[]")
-            item["insights"] = json.loads(item["insights"] or "[]")
-            item["applications"] = json.loads(item["applications"] or "[]")
-            items.append(item)
-        return items
-    finally:
-        conn.close()
+    return await search_learning_items(query, limit=limit)
 
 
-def get_stats() -> dict:
+async def get_stats() -> dict:
     """학습 통계."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        total = conn.execute("SELECT COUNT(*) FROM learning_items").fetchone()[0]
-        by_status = dict(conn.execute(
-            "SELECT status, COUNT(*) FROM learning_items GROUP BY status"
-        ).fetchall())
-        by_category = dict(conn.execute(
-            "SELECT category, COUNT(*) FROM learning_items GROUP BY category"
-        ).fetchall())
-        total_cost = conn.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM learning_items"
-        ).fetchone()[0]
-        return {
-            "total": total,
-            "by_status": by_status,
-            "by_category": by_category,
-            "total_cost_usd": round(total_cost, 4),
-        }
-    finally:
-        conn.close()
+    return await get_learning_stats()

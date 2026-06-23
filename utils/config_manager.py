@@ -36,6 +36,7 @@ _MANAGED_KEYS: dict[str, tuple[str, str, bool]] = {
     "NOTION_REPORT_DB":        ("Notion", "리포트 DB ID", True),
     "NOTION_SCHEDULE_DB":      ("Notion", "스케줄 DB ID", True),
     "NOTION_FIXED_COSTS_DB":   ("Notion", "고정비 DB ID (선택, 미설정 시 로컬 JSON만 사용)", True),
+    "NOTION_GICHO_LEARNING_DB": ("Notion", "기쵸 러닝 DB ID", True),
 
     # ── Discord ──────────────────────────────────────────────
     "DISCORD_TOKEN":        ("Discord", "Discord 봇 토큰 (필수, 재시작 필요해 전용 커맨드 없음)", False),

@@ -1834,7 +1834,7 @@ async def setup_commands(bot: commands.Bot):
                 await _send_error(interaction, error_title="등록 실패", error="유효한 URL이 없음")
                 return
 
-            item = create_learning_item(
+            item = await create_learning_item(
                 subject=subject,
                 category=category,
                 sources=urls,
@@ -1871,7 +1871,7 @@ async def setup_commands(bot: commands.Bot):
         try:
             from modules.gicho_learning import approve_item, execute_learning
 
-            if not approve_item(item_id):
+            if not await approve_item(item_id):
                 await _send_error(
                     interaction, error_title="승인 실패",
                     error="ID를 찾을 수 없거나 이미 처리됨",
@@ -1903,7 +1903,7 @@ async def setup_commands(bot: commands.Bot):
 
             if item_id:
                 # 단일 항목 상세
-                item = get_item(item_id)
+                item = await get_item(item_id)
                 if not item:
                     await _send_error(
                         interaction, error_title="조회 실패",
@@ -1911,8 +1911,8 @@ async def setup_commands(bot: commands.Bot):
                     )
                     return
 
-                insights = json.loads(item.get("insights") or "[]")
-                applications = json.loads(item.get("applications") or "[]")
+                insights = item.get("insights") or []
+                applications = item.get("applications") or []
 
                 embed = discord.Embed(
                     title=f"📚 학습 항목 `{item['id']}`",
@@ -1940,8 +1940,8 @@ async def setup_commands(bot: commands.Bot):
                     )
             else:
                 # 전체 통계 + 최근 목록
-                stats = get_stats()
-                items = list_items(limit=10)
+                stats = await get_stats()
+                items = await list_items(limit=10)
 
                 embed = discord.Embed(
                     title="📚 기쵸 러닝 시스템",
