@@ -330,7 +330,7 @@ footer {{ margin-top: 3em; padding-top: 1em; border-top: 1px solid #e5e7eb;
 {f'<div>요청: <code>{_html_escape(query)}</code></div>' if query else ''}
 <div>생성: {datetime.now():%Y-%m-%d %H:%M:%S}</div>
 </div>
-{"".join(body_parts)}
+{''.join(body_parts)}
 <footer>{_html_escape(footer)}</footer>
 </body></html>"""
 
