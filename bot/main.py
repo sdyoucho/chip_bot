@@ -20,6 +20,10 @@ load_dotenv()
 setup_logger()
 log = logging.getLogger(__name__)
 
+# /config_*, /rawdata_channel 등으로 런타임에 설정한 값 복원 (Railway Volume 마운트 시)
+from utils.config_manager import load_persisted_keys
+load_persisted_keys()
+
 # ── 인텐트 ──────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
@@ -111,16 +115,26 @@ async def on_ready():
 
 
 async def _notify_missing_config(bot_instance) -> None:
-    """재부팅 시 미설정된 API 키/연동을 점검해 R&D 채널(또는 DM)로 알림."""
+    """재부팅 시 미설정된 API 키/연동 + 영속 저장소 상태를 점검해 R&D 채널(또는 DM)로 알림."""
     try:
         from utils.config_manager import get_missing_keys
+        from utils.json_store import is_persistent
+
         missing = get_missing_keys()
-        if not missing:
+        lines = [f"❌ `{k}` — {v['desc']}" for k, v in missing.items()]
+
+        if not is_persistent():
+            lines.append(
+                "🗄️ **/data 볼륨 미마운트** — 크레딧 한도/임계치, 고정비, 모델 티어, "
+                "채널 ID 등 설정값이 재시작 시 초기화됩니다. Railway 대시보드에서 "
+                "Volume을 `/data`에 마운트하세요."
+            )
+
+        if not lines:
             return
 
-        lines = [f"❌ `{k}` — {v['desc']}" for k, v in missing.items()]
         content = "\n".join(lines) + "\n\n`/config_status`로 확인 후 설정해주세요."
-        title = f"⚠️ 미설정 API/연동 {len(missing)}건"
+        title = f"⚠️ 점검 필요 {len(lines)}건"
 
         from modules.rnd import post_to_rnd_channel
         ok = await post_to_rnd_channel(bot_instance, category="warning", title=title, content=content)
@@ -131,9 +145,9 @@ async def _notify_missing_config(bot_instance) -> None:
                 cho = await bot_instance.fetch_user(int(cho_id_str))
                 await cho.send(embed=discord.Embed(title=title, description=content, color=0xEAB308))
 
-        log.info(f"미설정 연동 알림: {len(missing)}건")
+        log.info(f"부팅 점검 알림: {len(lines)}건")
     except Exception as e:
-        log.warning(f"미설정 연동 알림 실패: {e}")
+        log.warning(f"부팅 점검 알림 실패: {e}")
 
 
 async def _sync_all_guilds():

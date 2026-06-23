@@ -19,9 +19,9 @@ FIXED_COSTS_FILE = store_path("fixed_costs.json")
 
 
 # ── 데이터 모델 ─────────────────────────────────────────────────────
-def _load() -> list[dict]:
+def _load_local() -> list[dict]:
     """
-    구조: [
+    로컬 JSON 캐시 조회. 구조: [
       {"name": "Railway Hobby", "amount_krw": 6500, "pay_day": 15, "last_paid": "2026-04-15"},
       {"name": "Claude Code Max", "amount_krw": 150000, "pay_day": 1, "last_paid": "2026-05-01"},
     ]
@@ -31,6 +31,45 @@ def _load() -> list[dict]:
 
 def _save(data: list[dict]) -> None:
     write_json(FIXED_COSTS_FILE, data)
+
+
+async def _load() -> list[dict]:
+    """
+    고정비 목록 조회 — Notion이 설정돼 있으면 Notion을 진짜 소스로 사용.
+
+    로컬 JSON(/data)은 Railway Volume이 마운트되지 않으면 재시작 시 초기화될 수
+    있으므로, 납부일·납부완료 기록은 Notion에 있을 때 그것을 우선한다.
+    로컬은 Notion 조회 실패 시 폴백용 캐시로만 사용.
+    """
+    local = _load_local()
+    if not _notion_enabled():
+        return local
+
+    try:
+        from utils.notion_client import list_fixed_costs as notion_list
+        remote = await notion_list()
+    except Exception as e:
+        log.warning(f"Notion 고정비 조회 실패, 로컬 캐시 사용: {e}")
+        return local
+
+    if not remote:
+        if local:
+            # Notion DB가 비어있는데 로컬에 기존 데이터가 있으면 최초 1회 업로드
+            log.info("Notion 고정비 DB가 비어있어 로컬 데이터를 최초 업로드합니다.")
+            from utils.notion_client import add_fixed_cost
+            for c in local:
+                try:
+                    await add_fixed_cost(c["name"], c["amount_krw"], c["pay_day"])
+                except Exception as e:
+                    log.warning(f"Notion 초기 업로드 실패 ({c['name']}): {e}")
+        return local
+
+    costs = [
+        {"name": c["name"], "amount_krw": c["amount_krw"], "pay_day": c["pay_day"], "last_paid": c["last_paid"]}
+        for c in remote
+    ]
+    _save(costs)  # 로컬 캐시 갱신 (Notion 조회 실패 시 폴백용)
+    return costs
 
 
 def _default_costs() -> list[dict]:
@@ -47,20 +86,20 @@ def _notion_enabled() -> bool:
 
 
 # ── 외부 모듈용 공개 접근자 (money.py 등) ────────────────────────────
-def get_costs() -> list[dict]:
+async def get_costs() -> list[dict]:
     """전체 고정비 목록."""
-    return _load()
+    return await _load()
 
 
-def get_total_monthly_krw() -> int:
+async def get_total_monthly_krw() -> int:
     """이번 달 고정비 합계."""
-    return sum(c["amount_krw"] for c in _load())
+    return sum(c["amount_krw"] for c in await _load())
 
 
 # ── Embed 생성 ─────────────────────────────────────────────────────
 async def list_fixed_costs() -> discord.Embed:
     """고정비 목록 + 다음 납부일 표시."""
-    costs = _load()
+    costs = await _load()
     today = date.today()
 
     embed = discord.Embed(
@@ -118,7 +157,7 @@ def _next_payment_date(pay_day: int, today: date) -> date:
 
 # ── CRUD (로컬 JSON이 항상 우선 반영되고, Notion 연동 시 best-effort로 미러링) ──
 async def add_cost(name: str, amount_krw: int, pay_day: int) -> str:
-    costs = _load()
+    costs = await _load()
     # 중복 체크
     if any(c["name"] == name for c in costs):
         return f"⚠️ '{name}' 이미 등록됨"
@@ -141,7 +180,7 @@ async def add_cost(name: str, amount_krw: int, pay_day: int) -> str:
 
 
 async def remove_cost(name: str) -> str:
-    costs = _load()
+    costs = await _load()
     new_costs = [c for c in costs if c["name"] != name]
     if len(new_costs) == len(costs):
         return f"⚠️ '{name}' 찾을 수 없음"
@@ -158,7 +197,7 @@ async def remove_cost(name: str) -> str:
 
 
 async def mark_paid(name: str) -> str:
-    costs = _load()
+    costs = await _load()
     for c in costs:
         if c["name"] == name:
             paid_date = date.today().isoformat()
@@ -202,7 +241,7 @@ async def sync_from_notion() -> str:
 # ── 알림 (매일 9시) ─────────────────────────────────────────────────
 async def check_upcoming_payments(bot: discord.Client) -> None:
     """D-3 이내 납부 예정 항목을 Cho에게 DM."""
-    costs = _load()
+    costs = await _load()
     today = date.today()
     cho_id = int(os.getenv("CHO_USER_ID", "0"))
     if not cho_id:

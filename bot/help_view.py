@@ -383,7 +383,8 @@ HELP_PAGES = [
                     "`/model_status` — 현재 티어링 조회\n"
                     "`/model_set` — 티어별 모델 변경\n"
                     "`/model_agent` — 에이전트 티어 변경\n"
-                    "`/model_reset` — 기본값 복원"
+                    "`/model_reset` — 기본값 복원\n"
+                    "ℹ️ router/light 티어는 `GEMINI_API_KEY` 설정 시 OpenRouter 없이 Gemini 직접 호출"
                 ),
                 "inline": False,
             },

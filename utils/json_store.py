@@ -16,6 +16,19 @@ log = logging.getLogger(__name__)
 
 _BASE = Path("/data") if Path("/data").exists() else Path("./data")
 _BASE.mkdir(parents=True, exist_ok=True)
+_IS_PERSISTENT = _BASE == Path("/data")
+
+if not _IS_PERSISTENT:
+    log.warning(
+        "/data 볼륨이 마운트되지 않아 ./data로 폴백 — Railway 등 컨테이너 배포에서는 "
+        "재시작/재배포 시 크레딧 설정·고정비·모델 티어 등 이 저장소의 모든 값이 초기화됩니다. "
+        "Railway 대시보드에서 Volume을 /data에 마운트하세요."
+    )
+
+
+def is_persistent() -> bool:
+    """/data가 실제 마운트된 Volume인지 여부. False면 재시작 시 저장된 값이 모두 초기화됨."""
+    return _IS_PERSISTENT
 
 
 def store_path(filename: str) -> Path:

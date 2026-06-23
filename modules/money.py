@@ -79,7 +79,7 @@ async def get_financial_summary() -> discord.Embed:
 
     # 고정비 (편집: /fixedcost_add 등)
     from modules.fixed_costs import get_total_monthly_krw
-    fixed_sum = get_total_monthly_krw()
+    fixed_sum = await get_total_monthly_krw()
     embed.add_field(
         name="🏢 고정비 (월)",
         value=f"₩{fixed_sum:,}",
@@ -186,7 +186,7 @@ async def monthly_settlement() -> discord.Embed:
 
     # 다음 달 예상
     from modules.fixed_costs import get_total_monthly_krw
-    fixed_sum = get_total_monthly_krw()
+    fixed_sum = await get_total_monthly_krw()
     total_next = int(projection * 1380) + fixed_sum
     embed.add_field(
         name="🔮 다음 달 예상 유지비",
@@ -257,7 +257,7 @@ async def handle_query(query: str) -> discord.Embed:
         )
 
         from modules.fixed_costs import get_costs
-        fixed_costs = get_costs()
+        fixed_costs = await get_costs()
         fixed_breakdown = (
             "\n".join(f"• {c['name']}: ₩{c['amount_krw']:,}" for c in fixed_costs)
             if fixed_costs else "• (등록된 고정비 없음)"

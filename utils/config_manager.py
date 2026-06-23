@@ -1,14 +1,24 @@
 """
 utils/config_manager.py
-Discord /config 커맨드에서 입력한 API 키를 .env에 저장.
-OpenRouter 통합 이후 개별 LLM 제공자 키는 선택 사항으로만 유지.
+Discord /config 커맨드 및 채널 설정 커맨드에서 변경한 값을 영속화.
+
+⚠️ .env 파일(_ENV_PATH)에 쓰는 것은 로컬 개발 편의용일 뿐, Railway 등 컨테이너
+배포에서는 재시작/재배포 시 파일시스템이 초기화되며 .env도 함께 사라진다.
+실제 영속화는 utils/json_store.py를 통해 /data(Railway Volume)에 저장하고,
+부팅 시 load_persisted_keys()로 환경변수에 복원한다.
 """
 
+import logging
 import os
 import re
 from pathlib import Path
 
+from utils.json_store import store_path, read_json, write_json
+
+log = logging.getLogger(__name__)
+
 _ENV_PATH = Path(__file__).parent.parent / ".env"
+_RUNTIME_CONFIG_FILE = store_path("runtime_config.json")
 
 # key: (group, desc, editable)
 # editable=False → 전용 커맨드로만 변경 가능 (예: 채널 ID, 봇 토큰) → 빠른 수정 Select 목록에서 제외.
@@ -37,11 +47,38 @@ _MANAGED_KEYS: dict[str, tuple[str, str, bool]] = {
 
 def set_key(key: str, value: str) -> None:
     os.environ[key] = value
+    _persist_runtime_key(key, value)
     try:
         _write_to_env_file(key, value)
     except OSError:
         # Railway 읽기전용 FS → 메모리 반영만
         pass
+
+
+def _persist_runtime_key(key: str, value: str) -> None:
+    """/data/runtime_config.json에 영속화 (Railway Volume 마운트 시 재부팅에도 유지됨)."""
+    data = read_json(_RUNTIME_CONFIG_FILE, dict)
+    data[key] = value
+    write_json(_RUNTIME_CONFIG_FILE, data)
+
+
+def load_persisted_keys() -> None:
+    """
+    부팅 시 1회 호출 — /data/runtime_config.json에 저장된 값을 환경변수로 복원.
+    Railway 환경변수(대시보드에서 설정한 값)가 이미 있으면 그 값을 우선하고,
+    비어있는 키만 복원한다.
+    """
+    data = read_json(_RUNTIME_CONFIG_FILE, dict)
+    restored = [k for k, v in data.items() if v and not os.getenv(k)]
+    for key in restored:
+        os.environ[key] = data[key]
+    if restored:
+        log.info(f"영속화된 설정 {len(restored)}개 복원: {', '.join(restored)}")
+    elif not _RUNTIME_CONFIG_FILE.exists():
+        log.warning(
+            "/data/runtime_config.json 없음 — Railway Volume이 /data에 마운트되지 "
+            "않았다면 /config_*, /rawdata_channel 등으로 설정한 값이 재시작 시 초기화됩니다."
+        )
 
 
 def _write_to_env_file(key: str, value: str) -> None:

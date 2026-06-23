@@ -142,4 +142,8 @@ python -c "from modules.youtube_auth import start_oauth_flow; start_oauth_flow('
 1. GitHub에 푸시
 2. Railway에서 프로젝트 생성 → GitHub 연동
 3. 환경변수 `.env` 내용을 Railway Variables에 입력
-4. 자동 배포됨
+4. **Volume을 `/data`에 마운트** (필수) — 크레딧 한도/임계치, 고정비, 모델 티어,
+   `/config_*`·채널 설정 명령으로 변경한 값이 여기 저장됨. 마운트하지 않으면
+   재시작/재배포마다 전부 초기화됨 (`is_persistent()`가 False면 부팅 시 R&D
+   채널/DM으로 경고 알림이 옴).
+5. 자동 배포됨
