@@ -155,6 +155,73 @@ async def get_broadcast_logs(streamer_name: str, days: int = 7) -> list[dict]:
     return logs
 
 
+# ── 고정비 관리 ──────────────────────────────────────────────────────
+async def list_fixed_costs() -> list[dict]:
+    """활성 고정비 목록 (Notion DB)."""
+    client = get_client()
+    res = await client.databases.query(
+        database_id=_db("FIXED_COSTS"),
+        filter={"property": "활성", "checkbox": {"equals": True}},
+    )
+    costs = []
+    for page in res.get("results", []):
+        p = page["properties"]
+        name_obj = p.get("이름", {}).get("title", [])
+        name = name_obj[0]["text"]["content"] if name_obj else "?"
+        last_paid = (p.get("마지막 납부일") or {}).get("date") or {}
+        costs.append({
+            "id": page["id"],
+            "name": name,
+            "amount_krw": int((p.get("금액") or {}).get("number") or 0),
+            "pay_day": int((p.get("납부일") or {}).get("number") or 1),
+            "last_paid": last_paid.get("start") or "",
+        })
+    return costs
+
+
+async def add_fixed_cost(name: str, amount_krw: int, pay_day: int) -> dict:
+    """고정비를 Notion DB에 등록."""
+    client = get_client()
+    page = await client.pages.create(
+        parent={"database_id": _db("FIXED_COSTS")},
+        properties={
+            "이름": {"title": [{"text": {"content": name}}]},
+            "금액": {"number": amount_krw},
+            "납부일": {"number": pay_day},
+            "활성": {"checkbox": True},
+        },
+    )
+    log.info(f"고정비 등록(Notion): {name} / ₩{amount_krw:,} / 매월 {pay_day}일")
+    return page
+
+
+async def archive_fixed_cost(name: str) -> bool:
+    """고정비 페이지를 archive 처리 (이름으로 검색)."""
+    client = get_client()
+    costs = await list_fixed_costs()
+    match = next((c for c in costs if c["name"] == name), None)
+    if not match:
+        return False
+    await client.pages.update(page_id=match["id"], archived=True)
+    log.info(f"고정비 삭제(Notion archive): {name}")
+    return True
+
+
+async def mark_fixed_cost_paid(name: str, paid_date: str) -> bool:
+    """고정비 페이지의 마지막 납부일을 업데이트 (이름으로 검색)."""
+    client = get_client()
+    costs = await list_fixed_costs()
+    match = next((c for c in costs if c["name"] == name), None)
+    if not match:
+        return False
+    await client.pages.update(
+        page_id=match["id"],
+        properties={"마지막 납부일": {"date": {"start": paid_date}}},
+    )
+    log.info(f"고정비 납부 기록(Notion): {name} / {paid_date}")
+    return True
+
+
 # ── 리포트 저장 ───────────────────────────────────────────────────────
 async def save_report(streamer_name: str, period: str, content: str) -> dict:
     """주간 리포트를 Notion에 저장."""

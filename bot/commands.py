@@ -1071,7 +1071,7 @@ async def setup_commands(bot: commands.Bot):
                 ephemeral=True,
             )
             return
-        msg = add_cost(name, amount_krw, pay_day)
+        msg = await add_cost(name, amount_krw, pay_day)
         await interaction.response.send_message(
             embed=embed_info("💳 고정비 등록", msg), ephemeral=True,
         )
@@ -1082,7 +1082,7 @@ async def setup_commands(bot: commands.Bot):
     async def cmd_fixedcost_remove(interaction: discord.Interaction, name: str):
         from modules.fixed_costs import remove_cost
         await interaction.response.send_message(
-            embed=embed_info("💳 고정비 삭제", remove_cost(name)),
+            embed=embed_info("💳 고정비 삭제", await remove_cost(name)),
             ephemeral=True,
         )
 
@@ -1092,7 +1092,16 @@ async def setup_commands(bot: commands.Bot):
     async def cmd_fixedcost_paid(interaction: discord.Interaction, name: str):
         from modules.fixed_costs import mark_paid
         await interaction.response.send_message(
-            embed=embed_info("💳 납부 완료", mark_paid(name)),
+            embed=embed_info("💳 납부 완료", await mark_paid(name)),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="fixedcost_sync", description="Notion 고정비 DB → 로컬 동기화")
+    @is_cho()
+    async def cmd_fixedcost_sync(interaction: discord.Interaction):
+        from modules.fixed_costs import sync_from_notion
+        await interaction.response.send_message(
+            embed=embed_info("💳 Notion 동기화", await sync_from_notion()),
             ephemeral=True,
         )
 
@@ -1164,25 +1173,33 @@ async def setup_commands(bot: commands.Bot):
     # ───────────────────────────────────────────────────────────
     # 개쵸 R&D
     # ───────────────────────────────────────────────────────────
-    @bot.tree.command(name="rnd_health", description="봇 자가 건강 진단")
+    @bot.tree.command(name="rnd_health", description="코드 리뷰 (파일 경로 또는 코드/문장)")
     @is_cho()
-    async def cmd_rnd_health(interaction: discord.Interaction):
+    @app_commands.describe(target="리뷰할 파일 경로 또는 코드/리뷰 요청 문장")
+    async def cmd_rnd_health(interaction: discord.Interaction, target: str):
         await interaction.response.defer(thinking=True)
         try:
+            from bot.router import parse_rnd_health_args
             from modules.rnd import run_health_check, post_to_rnd_channel
-            embed = await run_health_check(bot)
+
+            ok, payload = parse_rnd_health_args(target)
+            if not ok:
+                await _send_error(interaction, error_title="입력 오류", error=payload)
+                return
+
+            embed = await run_health_check(payload)
             await _send_response(
                 interaction, embed,
-                query="/rnd_health",
+                query=f"/rnd_health {payload[:80]}",
                 attach_files=True,
             )
             asyncio.create_task(post_to_rnd_channel(
                 bot, category="health",
-                title=f"수동 건강 체크 ({interaction.user.name})",
-                content="`/rnd_health` 실행",
+                title=f"수동 코드 리뷰 ({interaction.user.name})",
+                content=f"`/rnd_health {payload[:200]}` 실행",
             ))
         except Exception as e:
-            await _send_error(interaction, error_title="건강 진단 오류", error=e)
+            await _send_error(interaction, error_title="코드 리뷰 오류", error=e)
 
     @bot.tree.command(name="rnd_diagnose", description="이슈 진단")
     @is_cho()
@@ -1190,8 +1207,8 @@ async def setup_commands(bot: commands.Bot):
     async def cmd_rnd_diagnose(interaction: discord.Interaction, issue: str):
         await interaction.response.defer(thinking=True)
         try:
-            from modules.rnd import diagnose_issue, post_to_rnd_channel
-            embed = await diagnose_issue(issue)
+            from modules.rnd import diagnose_codebase, post_to_rnd_channel
+            embed = await diagnose_codebase(issue)
             await _send_response(
                 interaction, embed,
                 query=f"/rnd_diagnose {issue}",

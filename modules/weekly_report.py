@@ -88,6 +88,14 @@ async def generate_report(streamer_name: str = "all") -> discord.Embed:
         embed.set_footer(
             text=f"{result['model'].split('/')[-1]} · ${result['cost']:.5f} · 분쵸"
         )
+
+        try:
+            from utils.notion_client import save_report
+            period = f"{start:%Y-%m-%d} ~ {today:%Y-%m-%d}"
+            await save_report(streamer_name, period, result["content"])
+        except Exception as e:
+            log.warning(f"Notion 리포트 저장 실패 (NOTION_REPORT_DB 미설정일 수 있음): {e}")
+
         return embed
 
     except Exception as e:

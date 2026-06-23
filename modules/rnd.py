@@ -575,6 +575,7 @@ async def post_to_rnd_channel(
     title: str = "",
     content: str = "",
     embed: Optional[discord.Embed] = None,
+    author: Optional[str] = None,
 ) -> bool:
     """
     R&D 채널에 자동 게시 (재부팅 알림, 자동 코드 변경 등 외부 모듈에서 호출).
@@ -591,6 +592,8 @@ async def post_to_rnd_channel(
         본문.
     embed : Optional[discord.Embed]
         직접 임베드를 전달하면 그대로 사용.
+    author : Optional[str]
+        요청자 표시 (수동 커맨드 실행 시 누가 실행했는지 푸터에 표기).
 
     Returns
     -------
@@ -614,6 +617,7 @@ async def post_to_rnd_channel(
             "update":      0x059669,   # 녹색
             "error":       0xE11D48,   # 빨강
             "warning":     0xEAB308,   # 노랑
+            "health":      0x22C55E,   # 연두
             "general":     0x6366F1,   # 보라
         }
         emoji_map = {
@@ -621,6 +625,7 @@ async def post_to_rnd_channel(
             "update":      "🚀",
             "error":       "🚨",
             "warning":     "⚠️",
+            "health":      "🩺",
             "general":     "📢",
         }
         color = color_map.get(category, 0x6366F1)
@@ -633,7 +638,10 @@ async def post_to_rnd_channel(
                 color=color,
                 timestamp=datetime.now(),
             )
-            embed.set_footer(text=f"개쵸 R&D · {category}")
+            footer = f"개쵸 R&D · {category}"
+            if author:
+                footer += f" · 요청자: {author}"
+            embed.set_footer(text=footer)
 
         await channel.send(embed=embed)
         log.info("R&D 채널 게시 완료: %s — %s", category, title[:50])
@@ -693,4 +701,42 @@ async def announce_update(
         category="update",
         title=f"업데이트 {version}",
         content=content,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 7. 일일 건강 리포트 (스케줄러에서 매일 08:00 호출)
+# ═══════════════════════════════════════════════════════════════════
+
+async def daily_health_report(bot: discord.Client) -> bool:
+    """
+    봇 자가 건강 진단 — 가동 시간, 서버 연결 상태, 최근 24시간 에러 현황을
+    종합해 R&D 채널에 게시.
+    """
+    from utils.restart_manager import get_start_time, get_uptime, format_kst
+    from utils.self_monitor import get_error_summary, get_recent_errors
+
+    recent = get_recent_errors(minutes=1440)
+    summary = get_error_summary()
+
+    lines = [
+        f"**가동 시작**: {format_kst(get_start_time(), with_seconds=False)}",
+        f"**가동 시간**: {get_uptime()}",
+        f"**연결 서버**: {len(bot.guilds)}개",
+        f"**레이턴시**: {bot.latency * 1000:.0f}ms",
+        "",
+    ]
+
+    if not recent:
+        lines.append("✅ 최근 24시간 내 에러 없음")
+    else:
+        lines.append(f"⚠️ 최근 24시간 에러 {len(recent)}건")
+        top = sorted(summary.items(), key=lambda x: -x[1])[:5]
+        lines.extend(f"• {cat}: {cnt}회" for cat, cnt in top)
+
+    return await post_to_rnd_channel(
+        bot,
+        category="health" if not recent else "warning",
+        title="🩺 일일 건강 체크",
+        content="\n".join(lines),
     )

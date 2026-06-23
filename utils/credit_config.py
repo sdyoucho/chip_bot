@@ -11,15 +11,13 @@ Railway Volume(/data) 우선, 없으면 로컬 ./data/ 폴백.
 같은 달에는 같은 임계치를 두 번 보내지 않도록 한다.
 """
 
-import json
 import logging
-from pathlib import Path
+
+from utils.json_store import store_path, read_json, write_json
 
 log = logging.getLogger(__name__)
 
-_BASE = Path("/data") if Path("/data").exists() else Path("./data")
-_BASE.mkdir(parents=True, exist_ok=True)
-CONFIG_FILE = _BASE / "credit_config.json"
+CONFIG_FILE = store_path("credit_config.json")
 
 _DEFAULTS = {
     "monthly_limit": 50.0,           # USD
@@ -29,28 +27,20 @@ _DEFAULTS = {
 
 
 def _read() -> dict:
-    if not CONFIG_FILE.exists():
-        return {**_DEFAULTS, "alerted": {}}
+    raw = read_json(CONFIG_FILE, lambda: {**_DEFAULTS, "alerted": {}})
     try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         return {
-            "monthly_limit": float(data.get("monthly_limit", _DEFAULTS["monthly_limit"])),
-            "thresholds": sorted(float(t) for t in data.get("thresholds", _DEFAULTS["thresholds"])),
-            "alerted": data.get("alerted", {}),
+            "monthly_limit": float(raw.get("monthly_limit", _DEFAULTS["monthly_limit"])),
+            "thresholds": sorted(float(t) for t in raw.get("thresholds", _DEFAULTS["thresholds"])),
+            "alerted": raw.get("alerted", {}),
         }
-    except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
-        log.warning(f"credit_config.json 읽기 실패: {e}")
+    except (TypeError, ValueError) as e:
+        log.warning(f"credit_config.json 파싱 실패: {e}")
         return {**_DEFAULTS, "alerted": {}}
 
 
 def _write(data: dict) -> None:
-    try:
-        CONFIG_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as e:
-        log.warning(f"credit_config.json 쓰기 실패 (읽기전용 FS일 수 있음): {e}")
+    write_json(CONFIG_FILE, data)
 
 
 def get_monthly_limit() -> float:

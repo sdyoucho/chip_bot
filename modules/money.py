@@ -26,13 +26,6 @@ from utils.credit_config import (
 
 log = logging.getLogger(__name__)
 
-# 고정비 (서버·구독)
-FIXED_COSTS_KRW = {
-    "Railway Hobby": 6500,       # $5
-    "Claude Code Max": 150000,
-    "ChatGPT Plus": 30000,
-}
-
 
 async def get_financial_summary() -> discord.Embed:
     """현재 자금 현황 Embed."""
@@ -84,8 +77,9 @@ async def get_financial_summary() -> discord.Embed:
         )
         embed.add_field(name="🧠 모델별 (Top 5)", value=model_lines, inline=True)
 
-    # 고정비
-    fixed_sum = sum(FIXED_COSTS_KRW.values())
+    # 고정비 (편집: /fixedcost_add 등)
+    from modules.fixed_costs import get_total_monthly_krw
+    fixed_sum = get_total_monthly_krw()
     embed.add_field(
         name="🏢 고정비 (월)",
         value=f"₩{fixed_sum:,}",
@@ -191,7 +185,8 @@ async def monthly_settlement() -> discord.Embed:
         )
 
     # 다음 달 예상
-    fixed_sum = sum(FIXED_COSTS_KRW.values())
+    from modules.fixed_costs import get_total_monthly_krw
+    fixed_sum = get_total_monthly_krw()
     total_next = int(projection * 1380) + fixed_sum
     embed.add_field(
         name="🔮 다음 달 예상 유지비",
@@ -261,6 +256,14 @@ async def handle_query(query: str) -> discord.Embed:
             if by_model else "  - (데이터 없음)"
         )
 
+        from modules.fixed_costs import get_costs
+        fixed_costs = get_costs()
+        fixed_breakdown = (
+            "\n".join(f"• {c['name']}: ₩{c['amount_krw']:,}" for c in fixed_costs)
+            if fixed_costs else "• (등록된 고정비 없음)"
+        )
+        fixed_sum = sum(c["amount_krw"] for c in fixed_costs)
+
         context = f"""[현재 재무 스냅샷]
 • 등록 스트리머: {n}명
 • OpenRouter 크레딧: 사용 ${credits['usage']:.4f} / 총 ${credits['total']:.4f} ({credits['usage_ratio']*100:.1f}%)
@@ -274,10 +277,8 @@ async def handle_query(query: str) -> discord.Embed:
 {model_breakdown}
 
 [월 고정비]
-• Railway Hobby: ₩{FIXED_COSTS_KRW['Railway Hobby']:,}
-• Claude Code Max: ₩{FIXED_COSTS_KRW['Claude Code Max']:,}
-• ChatGPT Plus: ₩{FIXED_COSTS_KRW['ChatGPT Plus']:,}
-• 합계: ₩{sum(FIXED_COSTS_KRW.values()):,}
+{fixed_breakdown}
+• 합계: ₩{fixed_sum:,}
 """
 
         result = await chat(

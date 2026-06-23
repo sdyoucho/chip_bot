@@ -12,6 +12,13 @@ import discord
 log = logging.getLogger(__name__)
 
 
+def _parse_schedule_date(date_str: str) -> str:
+    """'YYYY-MM-DD' 또는 'YYYY-MM-DD HH:MM' → Notion date 문자열. 형식 오류 시 ValueError."""
+    if len(date_str) > 10:
+        return datetime.strptime(date_str, "%Y-%m-%d %H:%M").isoformat()
+    return datetime.strptime(date_str, "%Y-%m-%d").date().isoformat()
+
+
 # ── 조회 (기존 기능) ────────────────────────────────────────────────
 async def handle_schedule(query: str = "") -> discord.Embed:
     """이번 주 스케줄 조회."""
@@ -73,12 +80,7 @@ async def add_schedule(title: str, date_str: str, memo: str = "") -> discord.Emb
 
     # 날짜 파싱
     try:
-        if len(date_str) > 10:
-            dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-            notion_date = dt.isoformat()
-        else:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            notion_date = dt.date().isoformat()
+        notion_date = _parse_schedule_date(date_str)
     except ValueError:
         return discord.Embed(
             title="❌ 스쵸 — 등록 실패",
@@ -145,12 +147,7 @@ async def update_schedule(short_id: str, title: str = "", date_str: str = "") ->
             props["제목"] = {"title": [{"text": {"content": title}}]}
         if date_str:
             try:
-                if len(date_str) > 10:
-                    dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-                    notion_date = dt.isoformat()
-                else:
-                    dt = datetime.strptime(date_str, "%Y-%m-%d")
-                    notion_date = dt.date().isoformat()
+                notion_date = _parse_schedule_date(date_str)
                 props["날짜"] = {"date": {"start": notion_date}}
             except ValueError:
                 return discord.Embed(

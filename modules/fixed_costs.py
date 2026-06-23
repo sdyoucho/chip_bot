@@ -5,20 +5,17 @@ Notion DB 또는 JSON 파일로 납부일·금액·서비스 관리.
 매일 오전 9시 D-3 이내 납부 예정 알림.
 """
 
-import json
 import logging
 import os
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 import discord
 
+from utils.json_store import store_path, read_json, write_json
+
 log = logging.getLogger(__name__)
 
-# 저장 경로 (Railway Volume 우선)
-_BASE = Path("/data") if Path("/data").exists() else Path("./data")
-_BASE.mkdir(parents=True, exist_ok=True)
-FIXED_COSTS_FILE = _BASE / "fixed_costs.json"
+FIXED_COSTS_FILE = store_path("fixed_costs.json")
 
 
 # ── 데이터 모델 ─────────────────────────────────────────────────────
@@ -29,23 +26,11 @@ def _load() -> list[dict]:
       {"name": "Claude Code Max", "amount_krw": 150000, "pay_day": 1, "last_paid": "2026-05-01"},
     ]
     """
-    if not FIXED_COSTS_FILE.exists():
-        return _default_costs()
-    try:
-        return json.loads(FIXED_COSTS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        log.warning(f"fixed_costs.json 읽기 실패: {e}")
-        return _default_costs()
+    return read_json(FIXED_COSTS_FILE, _default_costs)
 
 
 def _save(data: list[dict]) -> None:
-    try:
-        FIXED_COSTS_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as e:
-        log.warning(f"fixed_costs.json 저장 실패: {e}")
+    write_json(FIXED_COSTS_FILE, data)
 
 
 def _default_costs() -> list[dict]:
@@ -55,6 +40,21 @@ def _default_costs() -> list[dict]:
         {"name": "Claude Code Max",  "amount_krw": 150000, "pay_day": 1,  "last_paid": ""},
         {"name": "ChatGPT Plus",     "amount_krw": 30000,  "pay_day": 1,  "last_paid": ""},
     ]
+
+
+def _notion_enabled() -> bool:
+    return bool(os.getenv("NOTION_TOKEN") and os.getenv("NOTION_FIXED_COSTS_DB"))
+
+
+# ── 외부 모듈용 공개 접근자 (money.py 등) ────────────────────────────
+def get_costs() -> list[dict]:
+    """전체 고정비 목록."""
+    return _load()
+
+
+def get_total_monthly_krw() -> int:
+    """이번 달 고정비 합계."""
+    return sum(c["amount_krw"] for c in _load())
 
 
 # ── Embed 생성 ─────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ async def list_fixed_costs() -> discord.Embed:
         value=f"**₩{total:,}**",
         inline=False,
     )
-    embed.set_footer(text="/fixedcost_add · /fixedcost_remove · /fixedcost_paid")
+    embed.set_footer(text="/fixedcost_add · /fixedcost_remove · /fixedcost_paid · /fixedcost_sync")
     return embed
 
 
@@ -116,8 +116,8 @@ def _next_payment_date(pay_day: int, today: date) -> date:
     return _safe_date(today.year, today.month + 1, pay_day)
 
 
-# ── CRUD ───────────────────────────────────────────────────────────
-def add_cost(name: str, amount_krw: int, pay_day: int) -> str:
+# ── CRUD (로컬 JSON이 항상 우선 반영되고, Notion 연동 시 best-effort로 미러링) ──
+async def add_cost(name: str, amount_krw: int, pay_day: int) -> str:
     costs = _load()
     # 중복 체크
     if any(c["name"] == name for c in costs):
@@ -129,26 +129,74 @@ def add_cost(name: str, amount_krw: int, pay_day: int) -> str:
         "last_paid": "",
     })
     _save(costs)
+
+    if _notion_enabled():
+        try:
+            from utils.notion_client import add_fixed_cost
+            await add_fixed_cost(name, amount_krw, pay_day)
+        except Exception as e:
+            log.warning(f"Notion 고정비 등록 동기화 실패: {e}")
+
     return f"✅ '{name}' 등록: ₩{amount_krw:,} / 매월 {pay_day}일"
 
 
-def remove_cost(name: str) -> str:
+async def remove_cost(name: str) -> str:
     costs = _load()
     new_costs = [c for c in costs if c["name"] != name]
     if len(new_costs) == len(costs):
         return f"⚠️ '{name}' 찾을 수 없음"
     _save(new_costs)
+
+    if _notion_enabled():
+        try:
+            from utils.notion_client import archive_fixed_cost
+            await archive_fixed_cost(name)
+        except Exception as e:
+            log.warning(f"Notion 고정비 삭제 동기화 실패: {e}")
+
     return f"✅ '{name}' 삭제됨"
 
 
-def mark_paid(name: str) -> str:
+async def mark_paid(name: str) -> str:
     costs = _load()
     for c in costs:
         if c["name"] == name:
-            c["last_paid"] = date.today().isoformat()
+            paid_date = date.today().isoformat()
+            c["last_paid"] = paid_date
             _save(costs)
-            return f"✅ '{name}' 납부 완료 기록 ({date.today():%Y-%m-%d})"
+
+            if _notion_enabled():
+                try:
+                    from utils.notion_client import mark_fixed_cost_paid
+                    await mark_fixed_cost_paid(name, paid_date)
+                except Exception as e:
+                    log.warning(f"Notion 고정비 납부 동기화 실패: {e}")
+
+            return f"✅ '{name}' 납부 완료 기록 ({paid_date})"
     return f"⚠️ '{name}' 찾을 수 없음"
+
+
+async def sync_from_notion() -> str:
+    """Notion DB 내용을 로컬 캐시로 가져옴 (Notion에서 직접 수정한 내용 반영)."""
+    if not _notion_enabled():
+        return "⚠️ NOTION_FIXED_COSTS_DB 미설정 — 로컬 데이터만 사용 중"
+    from utils.notion_client import list_fixed_costs as notion_list
+    try:
+        remote = await notion_list()
+    except Exception as e:
+        return f"❌ Notion 동기화 실패: {e}"
+
+    costs = [
+        {
+            "name": c["name"],
+            "amount_krw": c["amount_krw"],
+            "pay_day": c["pay_day"],
+            "last_paid": c["last_paid"],
+        }
+        for c in remote
+    ]
+    _save(costs)
+    return f"✅ Notion → 로컬 동기화 완료 ({len(costs)}건)"
 
 
 # ── 알림 (매일 9시) ─────────────────────────────────────────────────

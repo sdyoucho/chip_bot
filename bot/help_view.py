@@ -213,7 +213,8 @@ HELP_PAGES = [
                     "`/fixedcost_list` — 고정비 목록\n"
                     "`/fixedcost_add` — 고정비 등록\n"
                     "`/fixedcost_remove` — 삭제\n"
-                    "`/fixedcost_paid` — 납부 완료 기록"
+                    "`/fixedcost_paid` — 납부 완료 기록\n"
+                    "`/fixedcost_sync` — Notion DB → 로컬 동기화 (NOTION_FIXED_COSTS_DB 설정 시)"
                 ),
                 "inline": False,
             },
@@ -272,7 +273,7 @@ HELP_PAGES = [
             {
                 "name": "💬 진단·설계",
                 "value": (
-                    "`/rnd_health` — 봇 자가 건강 진단\n"
+                    "`/rnd_health [대상]` — 코드 리뷰 (파일 경로 또는 코드/문장)\n"
                     "`/rnd_diagnose [이슈]` — 이슈/버그 진단\n"
                     "`/rnd_design [요구사항]` — 신규 봇 설계서\n"
                     "`/rnd_errors` — 최근 60분 에러 리포트\n"

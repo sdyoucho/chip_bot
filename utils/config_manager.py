@@ -24,6 +24,7 @@ _MANAGED_KEYS = {
     "NOTION_BROADCAST_LOG_DB": ("Notion", "방송 로그 DB ID"),
     "NOTION_REPORT_DB":        ("Notion", "리포트 DB ID"),
     "NOTION_SCHEDULE_DB":      ("Notion", "스케줄 DB ID"),
+    "NOTION_FIXED_COSTS_DB":   ("Notion", "고정비 DB ID (선택, 미설정 시 로컬 JSON만 사용)"),
 
     # ── Discord ──────────────────────────────────────────────
     "DISCORD_TOKEN":        ("Discord", "Discord 봇 토큰 (필수)"),
