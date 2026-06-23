@@ -273,7 +273,8 @@ HELP_PAGES = [
             {
                 "name": "💬 진단·설계",
                 "value": (
-                    "`/rnd_health [대상]` — 코드 리뷰 (파일 경로 또는 코드/문장)\n"
+                    "`/rnd_health` — 전체 코드베이스 점검 (문법/참조/인자 오류, LLM 미사용)\n"
+                    "`/rnd_code_review [대상]` — 코드 리뷰 (파일 경로 또는 코드/문장)\n"
                     "`/rnd_diagnose [이슈]` — 이슈/버그 진단\n"
                     "`/rnd_design [요구사항]` — 신규 봇 설계서\n"
                     "`/rnd_errors` — 최근 60분 에러 리포트\n"
@@ -341,10 +342,10 @@ HELP_PAGES = [
             {
                 "name": "🔑 API 키 설정",
                 "value": (
-                    "`/config_ai` — OpenRouter 등 API 키\n"
-                    "`/config_notion` — Notion 토큰 + DB\n"
-                    "`/config_discord` — 오퍼레이터 유저 ID\n"
-                    "`/config_status` — 설정 현황 조회"
+                    "`/config_ai` — OpenRouter 등 API 키 (선택 메뉴로 변경)\n"
+                    "`/config_notion` — Notion 토큰 + DB (선택 메뉴로 변경)\n"
+                    "`/config_discord` — 오퍼레이터 유저 ID (선택 메뉴로 변경)\n"
+                    "`/config_status` — 전체 설정 현황 조회 + 그룹별 변경"
                 ),
                 "inline": False,
             },

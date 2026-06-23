@@ -4,14 +4,18 @@ modules/rnd.py
 
 역할:
 1. Q&A: 기술 질문 응답 (handle_query)
-2. 코드 리뷰: rnd_code_review (파일 경로 또는 코드 문장)
-3. 로그/이슈 진단: diagnose_codebase (/rnd_diagnose)
-4. 신규 봇 설계: design_new_bot
-5. R&D 채널 게시: post_to_rnd_channel (외부 모듈에서 호출)
+2. 코드 리뷰: run_code_review (/rnd_code_review, 파일 경로 또는 코드 문장)
+3. 전체 코드베이스 점검: run_codebase_scan (/rnd_health, LLM 미사용 정적 분석)
+4. 로그/이슈 진단: diagnose_codebase (/rnd_diagnose)
+5. 신규 봇 설계: design_new_bot
+6. R&D 채널 게시: post_to_rnd_channel (외부 모듈에서 호출)
+7. 업데이트 공지: announce_update
+8. 일일 건강 리포트: daily_health_report (스케줄러, 매일 08:00)
 
 OpenRouter: standard 티어 (Claude Opus 등)
 """
 
+import ast
 import io
 import logging
 import os
@@ -212,7 +216,7 @@ async def handle_query(query: str) -> discord.Embed:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 2. 코드 리뷰 (rnd_code_review)
+# 2. 코드 리뷰 (run_code_review) — /rnd_code_review 호출
 # ═══════════════════════════════════════════════════════════════════
 
 def _looks_like_path(target: str) -> bool:
@@ -274,9 +278,9 @@ def _read_code_file(path_str: str) -> Optional[tuple[Path, str]]:
         return None
 
 
-async def run_health_check(target: str) -> discord.Embed:
+async def run_code_review(target: str) -> discord.Embed:
     """
-    코드 리뷰 명령.
+    코드 리뷰 명령 (/rnd_code_review).
 
     Parameters
     ----------
@@ -295,8 +299,8 @@ async def run_health_check(target: str) -> discord.Embed:
         return embed_error(
             "코드 리뷰 실패",
             "리뷰할 파일 경로 또는 코드/문장을 입력해주세요.\n"
-            "예) `/rnd_health modules/rnd.py`\n"
-            "예) `/rnd_health def foo(): return 1/0`",
+            "예) `/rnd_code_review modules/rnd.py`\n"
+            "예) `/rnd_code_review def foo(): return 1/0`",
         )
 
     source_label: str = "직접 입력"
@@ -368,7 +372,151 @@ async def run_health_check(target: str) -> discord.Embed:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 3. 로그/이슈 진단 (diagnose_codebase) — /rnd_diagnose 호출
+# 3. 전체 코드베이스 점검 (run_codebase_scan) — /rnd_health 호출
+# LLM 미사용 — ast 기반 정적 분석으로 빠르고 결정론적으로 동작.
+# ═══════════════════════════════════════════════════════════════════
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SCAN_DIRS = ("modules", "utils", "bot")
+
+
+def _iter_scan_files() -> list[Path]:
+    files = []
+    for d in _SCAN_DIRS:
+        base = _PROJECT_ROOT / d
+        if base.exists():
+            files.extend(sorted(base.rglob("*.py")))
+    return files
+
+
+def _module_to_file(mod: str) -> Optional[Path]:
+    parts = mod.split(".")
+    candidate = _PROJECT_ROOT.joinpath(*parts).with_suffix(".py")
+    if candidate.exists():
+        return candidate
+    candidate2 = _PROJECT_ROOT.joinpath(*parts, "__init__.py")
+    return candidate2 if candidate2.exists() else None
+
+
+def _top_level_names(tree: ast.Module) -> set[str]:
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
+    return names
+
+
+def _function_signatures(tree: ast.Module) -> dict[str, tuple[set[str], bool]]:
+    sigs = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = node.args
+            param_names = {p.arg for p in a.posonlyargs + a.args + a.kwonlyargs}
+            sigs[node.name] = (param_names, a.kwarg is not None)
+    return sigs
+
+
+def _truncate_field(text: str, limit: int = 1000) -> str:
+    return text if len(text) <= limit else text[:limit] + "\n… (생략됨)"
+
+
+async def run_codebase_scan() -> discord.Embed:
+    """
+    modules/utils/bot 전체를 ast로 정적 분석해 다음을 점검:
+    (1) 문법 오류  (2) 존재하지 않는 이름을 import  (3) 시그니처에 없는 키워드 인자 호출.
+    LLM을 호출하지 않으므로 비용/지연 없이 즉시 실행됨.
+    """
+    files = _iter_scan_files()
+    trees: dict[Path, ast.Module] = {}
+    syntax_errors: list[str] = []
+
+    for f in files:
+        try:
+            trees[f] = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+        except SyntaxError as e:
+            rel = f.relative_to(_PROJECT_ROOT)
+            syntax_errors.append(f"`{rel}:{e.lineno}` {e.msg}")
+
+    import_issues: list[str] = []
+    kwarg_issues: list[str] = []
+    sig_cache: dict[Path, dict] = {}
+
+    for f, tree in trees.items():
+        rel = f.relative_to(_PROJECT_ROOT)
+        bindings: dict[str, tuple[Path, str]] = {
+            node.name: (f, node.name) for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                if not node.module.startswith(_SCAN_DIRS):
+                    continue
+                target = _module_to_file(node.module)
+                if not target or target not in trees:
+                    continue
+                target_names = _top_level_names(trees[target])
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    bindings[alias.asname or alias.name] = (target, alias.name)
+                    if alias.name not in target_names:
+                        import_issues.append(
+                            f"`{rel}:{node.lineno}` `from {node.module} import {alias.name}` "
+                            f"→ `{target.relative_to(_PROJECT_ROOT)}`에 없음"
+                        )
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                binding = bindings.get(node.func.id)
+                if not binding:
+                    continue
+                target_file, real_name = binding
+                sigs = sig_cache.setdefault(target_file, _function_signatures(trees[target_file]))
+                if real_name not in sigs:
+                    continue
+                param_names, has_kwarg = sigs[real_name]
+                if has_kwarg:
+                    continue
+                for kw in node.keywords:
+                    if kw.arg and kw.arg not in param_names:
+                        kwarg_issues.append(
+                            f"`{rel}:{node.lineno}` `{node.func.id}(..., {kw.arg}=...)` "
+                            f"→ `{real_name}`에 없는 인자"
+                        )
+
+    total = len(syntax_errors) + len(import_issues) + len(kwarg_issues)
+    embed = discord.Embed(
+        title="🩺 개쵸 — 전체 코드베이스 점검",
+        description=f"검사 파일: {len(files)}개 (modules/utils/bot)\n발견된 이슈: **{total}건**",
+        color=0xDC2626 if total else 0x22C55E,
+    )
+    if syntax_errors:
+        embed.add_field(
+            name=f"🔴 문법 오류 ({len(syntax_errors)})",
+            value=_truncate_field("\n".join(syntax_errors)), inline=False,
+        )
+    if import_issues:
+        embed.add_field(
+            name=f"🟠 존재하지 않는 import ({len(import_issues)})",
+            value=_truncate_field("\n".join(import_issues)), inline=False,
+        )
+    if kwarg_issues:
+        embed.add_field(
+            name=f"🟡 정의에 없는 인자 호출 ({len(kwarg_issues)})",
+            value=_truncate_field("\n".join(kwarg_issues)), inline=False,
+        )
+    if not total:
+        embed.add_field(name="✅ 결과", value="문법/참조/인자 오류 없음", inline=False)
+    embed.set_footer(text="정적 분석 (LLM 미사용) · 파일 1개 코드 리뷰: /rnd_code_review")
+    return embed
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. 로그/이슈 진단 (diagnose_codebase) — /rnd_diagnose 호출
 # ═══════════════════════════════════════════════════════════════════
 
 async def diagnose_codebase(issue: Optional[str] = None) -> discord.Embed:
@@ -502,7 +650,7 @@ def _collect_codebase_summary() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. 신규 봇 설계 (design_new_bot)
+# 5. 신규 봇 설계 (design_new_bot)
 # ═══════════════════════════════════════════════════════════════════
 
 async def design_new_bot(requirements: str) -> discord.Embed:
@@ -565,7 +713,7 @@ async def design_new_bot(requirements: str) -> discord.Embed:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 5. R&D 채널 게시 (post_to_rnd_channel) — 외부 모듈에서 호출
+# 6. R&D 채널 게시 (post_to_rnd_channel) — 외부 모듈에서 호출
 # ═══════════════════════════════════════════════════════════════════
 
 async def post_to_rnd_channel(
@@ -656,7 +804,7 @@ async def post_to_rnd_channel(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 6. 업데이트 공지 헬퍼
+# 7. 업데이트 공지 헬퍼
 # ═══════════════════════════════════════════════════════════════════
 
 async def announce_update(
@@ -705,7 +853,7 @@ async def announce_update(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 7. 일일 건강 리포트 (스케줄러에서 매일 08:00 호출)
+# 8. 일일 건강 리포트 (스케줄러에서 매일 08:00 호출)
 # ═══════════════════════════════════════════════════════════════════
 
 async def daily_health_report(bot: discord.Client) -> bool:

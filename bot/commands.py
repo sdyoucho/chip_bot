@@ -273,137 +273,93 @@ async def _send_error(
 # Modals
 # ═══════════════════════════════════════════════════════════════════
 
-class _AIKeysModal(discord.ui.Modal, title="AI API 키 설정"):
-    openrouter = discord.ui.TextInput(
-        label="OpenRouter API Key (필수)",
-        placeholder="sk-or-v1-...",
-        required=True,
-        style=discord.TextStyle.short,
-        max_length=200,
-    )
-    perplexity = discord.ui.TextInput(
-        label="Perplexity API Key (선택)",
-        placeholder="pplx-...",
-        required=False,
-        style=discord.TextStyle.short,
-        max_length=200,
-    )
-    youtube = discord.ui.TextInput(
-        label="YouTube Data API v3 Key",
-        placeholder="AIza...",
-        required=False,
-        style=discord.TextStyle.short,
-        max_length=200,
-    )
-    github_token = discord.ui.TextInput(
-        label="GitHub Personal Access Token (선택)",
-        placeholder="ghp_... 또는 github_pat_...",
-        required=False,
-        style=discord.TextStyle.short,
-        max_length=200,
-    )
+class _ConfigEditModal(discord.ui.Modal):
+    """Select에서 고른 키만 입력 필드로 보여주는 동적 설정 변경 모달."""
+
+    def __init__(self, keys: list[str], title: str):
+        super().__init__(title=title[:45])
+        from utils.config_manager import get_status
+        status = get_status()
+        for key in keys[:5]:
+            info = status.get(key, {})
+            current = info.get("masked", "미설정")
+            desc = (info.get("desc") or "")[:80]
+            self.add_item(discord.ui.TextInput(
+                label=key[:45],
+                placeholder=f"{desc} · 현재: {current}"[:100],
+                required=False,
+                style=discord.TextStyle.short,
+                max_length=200,
+            ))
 
     async def on_submit(self, interaction: discord.Interaction):
         from utils.config_manager import set_key
-        updated = []
-        mapping = [
-            (self.openrouter.value,   "OPENROUTER_API_KEY", "OpenRouter"),
-            (self.perplexity.value,   "PERPLEXITY_API_KEY", "Perplexity"),
-            (self.youtube.value,      "YOUTUBE_API_KEY",    "YouTube"),
-            (self.github_token.value, "GITHUB_TOKEN",       "GitHub"),
+        updated = [
+            item.label for item in self.children
+            if isinstance(item, discord.ui.TextInput) and item.value.strip()
         ]
-        for val, env_key, label in mapping:
-            if val.strip():
-                set_key(env_key, val.strip())
-                updated.append(label)
+        for item in self.children:
+            if isinstance(item, discord.ui.TextInput) and item.value.strip():
+                set_key(item.label, item.value.strip())
 
-        msg = f"저장 완료: {', '.join(updated)}" if updated else "입력된 키가 없습니다."
+        msg = (
+            f"저장 완료: {', '.join(updated)}"
+            if updated else "변경된 값이 없습니다 (빈 칸은 기존 값 유지)."
+        )
         await interaction.response.send_message(
-            embed=embed_info("🔑 AI API 키", msg), ephemeral=True
+            embed=embed_info("⚙️ 설정 변경", msg), ephemeral=True,
         )
 
 
-class _NotionKeysModal(discord.ui.Modal, title="Notion 설정"):
-    token = discord.ui.TextInput(
-        label="Notion API Token",
-        placeholder="secret_...",
-        required=False,
-        style=discord.TextStyle.short,
-        max_length=200,
-    )
-    streamers_db = discord.ui.TextInput(
-        label="스트리머 DB ID",
-        required=False, style=discord.TextStyle.short, max_length=100,
-    )
-    broadcast_db = discord.ui.TextInput(
-        label="방송 로그 DB ID",
-        required=False, style=discord.TextStyle.short, max_length=100,
-    )
-    report_db = discord.ui.TextInput(
-        label="리포트 DB ID",
-        required=False, style=discord.TextStyle.short, max_length=100,
-    )
-    schedule_db = discord.ui.TextInput(
-        label="스케줄 DB ID",
-        required=False, style=discord.TextStyle.short, max_length=100,
-    )
+class _ConfigKeySelect(discord.ui.Select):
+    """그룹별 편집 가능한 키 목록 — 선택 시 해당 키만 담은 모달을 띄움."""
 
-    async def on_submit(self, interaction: discord.Interaction):
-        from utils.config_manager import set_key
-        updated = []
-        mapping = [
-            (self.token.value,        "NOTION_TOKEN",           "Token"),
-            (self.streamers_db.value, "NOTION_STREAMERS_DB",    "Streamers DB"),
-            (self.broadcast_db.value, "NOTION_BROADCAST_LOG_DB","Broadcast DB"),
-            (self.report_db.value,    "NOTION_REPORT_DB",       "Report DB"),
-            (self.schedule_db.value,  "NOTION_SCHEDULE_DB",     "Schedule DB"),
-        ]
-        for val, env_key, label in mapping:
-            if val.strip():
-                set_key(env_key, val.strip())
-                updated.append(label)
-
-        msg = f"저장 완료: {', '.join(updated)}" if updated else "입력된 값이 없습니다."
-        await interaction.response.send_message(
-            embed=embed_info("📋 Notion 설정", msg), ephemeral=True
+    def __init__(self, group: str, modal_title: str):
+        from utils.config_manager import get_editable_keys
+        keys = get_editable_keys(group)
+        options = [
+            discord.SelectOption(
+                label=key,
+                description=info["desc"][:100],
+                emoji="✅" if info["set"] else "❌",
+            )
+            for key, info in keys.items()
+        ][:25] or [discord.SelectOption(label="(편집 가능한 키 없음)", value="__none__")]
+        super().__init__(
+            placeholder=f"변경할 {group} 항목 선택 (최대 5개)",
+            min_values=1,
+            max_values=min(len(options), 5),
+            options=options,
         )
+        self.modal_title = modal_title
 
-
-class _DiscordKeysModal(discord.ui.Modal, title="Discord 오퍼레이터 설정"):
-    cho_user_id = discord.ui.TextInput(
-        label="오퍼레이터 유저 ID (CHO_USER_ID)",
-        placeholder="Discord 개발자 모드 → 프로필 우클릭 → 사용자 ID 복사",
-        required=True,
-        style=discord.TextStyle.short,
-        max_length=30,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        from utils.config_manager import set_key
-        val = self.cho_user_id.value.strip()
-        if not val.isdigit():
+    async def callback(self, interaction: discord.Interaction):
+        if self.values == ["__none__"]:
             await interaction.response.send_message(
-                embed=embed_error(
-                    "입력 오류",
-                    "유저 ID는 숫자만 입력 가능합니다.\n"
-                    "Discord 설정 → 고급 → 개발자 모드 ON → 프로필 우클릭 → 사용자 ID 복사",
-                ),
-                ephemeral=True,
+                embed=embed_info("⚙️ 설정 변경", "편집 가능한 키가 없습니다."), ephemeral=True,
             )
             return
+        await interaction.response.send_modal(_ConfigEditModal(self.values, self.modal_title))
 
-        set_key("CHO_USER_ID", val)
-        await interaction.response.send_message(
-            embed=embed_info(
-                "🤖 Discord 설정",
-                f"✅ CHO_USER_ID 저장 완료: `{val}`\n\n"
-                "**채널 설정은 전용 커맨드를 사용해주세요**:\n"
-                "• `/rawdata_channel` — Raw Data 트레이스 채널\n"
-                "• `/rnd_channel` — R&D 공지 채널\n"
-                "• `/forum_channel` — 해쵸 포럼 세션 채널",
-            ),
-            ephemeral=True,
-        )
+
+class _ConfigKeySelectView(discord.ui.View):
+    def __init__(self, group: str, modal_title: str):
+        super().__init__(timeout=180)
+        self.add_item(_ConfigKeySelect(group, modal_title))
+
+
+def _build_group_status_embed(group: str, title: str, *, color: int = 0x4F46E5) -> discord.Embed:
+    """그룹별 현재 설정 현황 Embed (이모지로 설정 여부 표시)."""
+    from utils.config_manager import get_status
+    status = get_status()
+    embed = discord.Embed(title=title, color=color)
+    lines = [
+        f"{'✅' if info['set'] else '❌'} `{key}` — {info['desc']}"
+        for key, info in status.items() if info["group"] == group
+    ]
+    embed.description = "\n".join(lines) if lines else "등록된 키 없음"
+    embed.set_footer(text="아래 메뉴에서 변경할 항목을 선택하세요")
+    return embed
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -835,17 +791,21 @@ async def setup_commands(bot: commands.Bot):
     # ───────────────────────────────────────────────────────────
     # 설정 — API/Notion/Discord
     # ───────────────────────────────────────────────────────────
-    @bot.tree.command(name="config_ai", description="AI API 키 설정")
+    @bot.tree.command(name="config_ai", description="AI API 키 설정 조회 및 변경")
     @is_cho()
     async def cmd_config_ai(interaction: discord.Interaction):
-        await interaction.response.send_modal(_AIKeysModal())
+        embed = _build_group_status_embed("AI", "🔑 AI API 키 설정")
+        view = _ConfigKeySelectView("AI", "AI API 키 변경")
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @bot.tree.command(name="config_notion", description="Notion 설정")
+    @bot.tree.command(name="config_notion", description="Notion 설정 조회 및 변경")
     @is_cho()
     async def cmd_config_notion(interaction: discord.Interaction):
-        await interaction.response.send_modal(_NotionKeysModal())
+        embed = _build_group_status_embed("Notion", "📋 Notion 설정")
+        view = _ConfigKeySelectView("Notion", "Notion 설정 변경")
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @bot.tree.command(name="config_discord", description="Discord 오퍼레이터 설정")
+    @bot.tree.command(name="config_discord", description="Discord 오퍼레이터 설정 조회 및 변경")
     async def cmd_config_discord(interaction: discord.Interaction):
         """⚠️ is_cho 데코레이터 없음 — 초기 설정 시 CHO_USER_ID가 없어도 호출 가능."""
         cho_id_str = os.getenv("CHO_USER_ID", "").strip()
@@ -855,27 +815,36 @@ async def setup_commands(bot: commands.Bot):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(_DiscordKeysModal())
+        embed = _build_group_status_embed("Discord", "🤖 Discord 오퍼레이터 설정")
+        embed.add_field(
+            name="채널 설정 전용 커맨드",
+            value="`/rawdata_channel` · `/rnd_channel` · `/forum_channel`",
+            inline=False,
+        )
+        view = _ConfigKeySelectView("Discord", "Discord 설정 변경")
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @bot.tree.command(name="config_status", description="현재 API 키 설정 현황")
+    @bot.tree.command(name="config_status", description="현재 API 키 설정 현황 (전체 조회 및 변경)")
     @is_cho()
     async def cmd_config_status(interaction: discord.Interaction):
         from utils.config_manager import get_status
         status = get_status()
 
         embed = discord.Embed(title="⚙️ API 설정 현황", color=0x4F46E5)
-
         groups: dict[str, list[str]] = {}
         for key, info in status.items():
-            g = info["group"]
             icon = "✅" if info["set"] else "❌"
-            groups.setdefault(g, []).append(f"{icon} `{key}`\n　{info['desc']}")
-
+            groups.setdefault(info["group"], []).append(f"{icon} `{key}`\n　{info['desc']}")
         for group, lines in groups.items():
             embed.add_field(name=group, value="\n".join(lines), inline=False)
+        embed.set_footer(text="아래 메뉴에서 그룹별로 변경할 항목을 선택하세요")
 
-        embed.set_footer(text="변경: /config_ai · /config_notion · /config_discord")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        view = discord.ui.View(timeout=180)
+        for group, modal_title in (
+            ("AI", "AI API 키 변경"), ("Notion", "Notion 설정 변경"), ("Discord", "Discord 설정 변경"),
+        ):
+            view.add_item(_ConfigKeySelect(group, modal_title))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     # ───────────────────────────────────────────────────────────
     # Raw Data 트레이스
@@ -1173,30 +1142,51 @@ async def setup_commands(bot: commands.Bot):
     # ───────────────────────────────────────────────────────────
     # 개쵸 R&D
     # ───────────────────────────────────────────────────────────
-    @bot.tree.command(name="rnd_health", description="코드 리뷰 (파일 경로 또는 코드/문장)")
+    @bot.tree.command(name="rnd_health", description="전체 코드베이스 점검 (문법/참조/인자 오류, LLM 미사용)")
     @is_cho()
-    @app_commands.describe(target="리뷰할 파일 경로 또는 코드/리뷰 요청 문장")
-    async def cmd_rnd_health(interaction: discord.Interaction, target: str):
+    async def cmd_rnd_health(interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
         try:
-            from bot.router import parse_rnd_health_args
-            from modules.rnd import run_health_check, post_to_rnd_channel
+            from modules.rnd import run_codebase_scan, post_to_rnd_channel
+            embed = await run_codebase_scan()
+            await _send_response(
+                interaction, embed,
+                query="/rnd_health",
+                attach_files=True,
+            )
+            asyncio.create_task(post_to_rnd_channel(
+                bot, category="health",
+                title=f"수동 건강 체크 ({interaction.user.name})",
+                content="`/rnd_health` 실행",
+                author=interaction.user.name,
+            ))
+        except Exception as e:
+            await _send_error(interaction, error_title="건강 진단 오류", error=e)
 
-            ok, payload = parse_rnd_health_args(target)
+    @bot.tree.command(name="rnd_code_review", description="코드 리뷰 (파일 경로 또는 코드/문장)")
+    @is_cho()
+    @app_commands.describe(target="리뷰할 파일 경로 또는 코드/리뷰 요청 문장")
+    async def cmd_rnd_code_review(interaction: discord.Interaction, target: str):
+        await interaction.response.defer(thinking=True)
+        try:
+            from bot.router import parse_rnd_code_review_args
+            from modules.rnd import run_code_review, post_to_rnd_channel
+
+            ok, payload = parse_rnd_code_review_args(target)
             if not ok:
                 await _send_error(interaction, error_title="입력 오류", error=payload)
                 return
 
-            embed = await run_health_check(payload)
+            embed = await run_code_review(payload)
             await _send_response(
                 interaction, embed,
-                query=f"/rnd_health {payload[:80]}",
+                query=f"/rnd_code_review {payload[:80]}",
                 attach_files=True,
             )
             asyncio.create_task(post_to_rnd_channel(
                 bot, category="health",
                 title=f"수동 코드 리뷰 ({interaction.user.name})",
-                content=f"`/rnd_health {payload[:200]}` 실행",
+                content=f"`/rnd_code_review {payload[:200]}` 실행",
             ))
         except Exception as e:
             await _send_error(interaction, error_title="코드 리뷰 오류", error=e)

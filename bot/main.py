@@ -106,6 +106,35 @@ async def on_ready():
     from utils.restart_manager import send_restart_notification
     asyncio.create_task(send_restart_notification(bot))
 
+    # ── 미설정 API/연동 알림 (재부팅마다 확인) ───────────────────
+    asyncio.create_task(_notify_missing_config(bot))
+
+
+async def _notify_missing_config(bot_instance) -> None:
+    """재부팅 시 미설정된 API 키/연동을 점검해 R&D 채널(또는 DM)로 알림."""
+    try:
+        from utils.config_manager import get_missing_keys
+        missing = get_missing_keys()
+        if not missing:
+            return
+
+        lines = [f"❌ `{k}` — {v['desc']}" for k, v in missing.items()]
+        content = "\n".join(lines) + "\n\n`/config_status`로 확인 후 설정해주세요."
+        title = f"⚠️ 미설정 API/연동 {len(missing)}건"
+
+        from modules.rnd import post_to_rnd_channel
+        ok = await post_to_rnd_channel(bot_instance, category="warning", title=title, content=content)
+
+        if not ok:
+            cho_id_str = os.getenv("CHO_USER_ID", "").strip()
+            if cho_id_str.isdigit():
+                cho = await bot_instance.fetch_user(int(cho_id_str))
+                await cho.send(embed=discord.Embed(title=title, description=content, color=0xEAB308))
+
+        log.info(f"미설정 연동 알림: {len(missing)}건")
+    except Exception as e:
+        log.warning(f"미설정 연동 알림 실패: {e}")
+
 
 async def _sync_all_guilds():
     """참여 중인 모든 서버에 슬래시 커맨드 동기화 (즉시 반영)."""

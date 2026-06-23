@@ -9,7 +9,7 @@ OpenRouter 기반 라우팅 엔진 (gpt-5.4-nano 사용).
 - max_tokens 증가 (300 → 500)
 
 🆕 v3 변경:
-- rnd_health 명령 인자 파싱: 단일 토큰 → '나머지 전체 문자열'
+- rnd_code_review 명령 인자 파싱: 단일 토큰 → '나머지 전체 문자열'
 - 인자가 비어있으면 사용법 안내 메시지 반환
 
 🆕 v4 변경:
@@ -176,19 +176,19 @@ def _categorize_url(url: str) -> tuple[str, str, str] | None:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 명령어 인자 파싱 (rnd_health 등)
+# 명령어 인자 파싱 (rnd_code_review 등)
 # ═══════════════════════════════════════════════════════════════════
 
-RND_HEALTH_USAGE: str = (
-    "ℹ️ 사용법: `rnd_health <파일경로 또는 리뷰 요청 문장>`\n"
-    "예) `rnd_health bot/router.py`\n"
-    "예) `rnd_health modules/rnd.py 의 예외처리가 안전한지 봐줘`"
+RND_CODE_REVIEW_USAGE: str = (
+    "ℹ️ 사용법: `rnd_code_review <파일경로 또는 리뷰 요청 문장>`\n"
+    "예) `rnd_code_review bot/router.py`\n"
+    "예) `rnd_code_review modules/rnd.py 의 예외처리가 안전한지 봐줘`"
 )
 
 
-def parse_rnd_health_args(args: list[str] | str) -> tuple[bool, str]:
+def parse_rnd_code_review_args(args: list[str] | str) -> tuple[bool, str]:
     """
-    rnd_health 명령의 인자를 파싱한다.
+    rnd_code_review 명령의 인자를 파싱한다.
 
     기존: split 후 첫 토큰만 사용 → 자유 문장/공백 포함 경로 처리 불가
     변경: 나머지 전체 문자열을 그대로 전달 (코드리뷰 요청 문장 지원)
@@ -207,7 +207,7 @@ def parse_rnd_health_args(args: list[str] | str) -> tuple[bool, str]:
         joined = " ".join(a for a in args if a is not None).strip()
 
     if not joined:
-        return False, RND_HEALTH_USAGE
+        return False, RND_CODE_REVIEW_USAGE
 
     return True, joined
 
